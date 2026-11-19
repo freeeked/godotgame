@@ -10,19 +10,46 @@ extends Node3D
 
 var _camera_rig: Node3D
 var _camera: Camera3D
+var _reticle: ColorRect
 var _yaw: float = 0.0
 var _pitch: float = -0.25
 var _smoothed_anchor: Vector3 = Vector3.ZERO
 var _has_anchor: bool = false
 
 func _ready() -> void:
-	_camera = find_child("Camera3D", true, false) as Camera3D
-	if _camera == null:
-		for child in get_children():
-			if child is Camera3D:
-				_camera = child
-				break
+	_setup_lighting_if_needed()
+	_setup_camera()
+	_setup_reticle()
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
+	if player_stack != null:
+		player_stack.target_lock_changed.connect(func(_id: int, _blob_name: String, is_locked: bool) -> void:
+			if _reticle != null:
+				_reticle.color = Color("38bdf8") if is_locked else Color(1.0, 1.0, 1.0, 0.75)
+				_reticle.scale = Vector2(1.4, 1.4) if is_locked else Vector2.ONE
+		)
+		player_stack.stack_swap_completed.connect(func(_id: int, blob_name: String) -> void:
+			print("[StackSwap] Swooped onto ", blob_name, " as new base driver!")
+		)
+		player_stack.blob_void_died.connect(func(_id: int, blob_name: String) -> void:
+			print("[VoidDeath] ", blob_name, " fell into the void.")
+		)
+
+func _setup_lighting_if_needed() -> void:
+	if find_child("WorldEnvironment", true, false) == null:
+		var world_env := WorldEnvironment.new()
+		world_env.name = "WorldEnvironment"
+		var env := Environment.new()
+		env.background_mode = Environment.BG_COLOR
+		env.background_color = Color("334155")
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env.ambient_light_color = Color("e2e8f0")
+		env.ambient_light_energy = 0.65
+		world_env.environment = env
+		add_child(world_env)
+
+func _setup_camera() -> void:
+	_camera = find_child("Camera3D", true, false) as Camera3D
 	_camera_rig = get_node_or_null("CameraRig") as Node3D
 	if _camera_rig == null:
 		_camera_rig = Node3D.new()
@@ -37,15 +64,26 @@ func _ready() -> void:
 		_camera.reparent(_camera_rig)
 
 	_camera.current = true
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
-	if player_stack != null:
-		player_stack.blob_void_died.connect(func(_id: int, blob_name: String) -> void:
-			print("[VoidDeath] ", blob_name, " fell into the void (won't return on R until respawn)")
-		)
-		player_stack.void_fell.connect(func() -> void:
-			print("[VoidDeath] Base driver fell into the void -> full respawn!")
-		)
+func _setup_reticle() -> void:
+	_reticle = find_child("Reticle", true, false) as ColorRect
+	if _reticle == null:
+		var hud := CanvasLayer.new()
+		hud.name = "HUD"
+		add_child(hud)
+
+		_reticle = ColorRect.new()
+		_reticle.name = "Reticle"
+		_reticle.size = Vector2(8, 8)
+		_reticle.pivot_offset = Vector2(4, 4)
+		_reticle.set_anchors_preset(Control.PRESET_CENTER)
+		_reticle.offset_left = -4
+		_reticle.offset_top = -4
+		_reticle.offset_right = 4
+		_reticle.offset_bottom = 4
+		_reticle.color = Color(1.0, 1.0, 1.0, 0.75)
+		_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hud.add_child(_reticle)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -86,7 +124,7 @@ func _physics_process(delta: float) -> void:
 	_yaw += orbit_x * key_orbit_speed * delta
 	_pitch = clampf(_pitch + orbit_y * key_orbit_speed * delta, -1.1, 0.65)
 
-	player_stack.step_stack(delta, _yaw)
+	player_stack.step_stack(delta, _yaw, _camera)
 
 	var target_anchor := player_stack.get_leader_position()
 	if not _has_anchor:

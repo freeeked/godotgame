@@ -6,6 +6,8 @@ signal blob_ejected(blob_id: int, blob_name: String, is_roll: bool)
 signal blob_reabsorbed(blob_id: int, blob_name: String, was_recalling: bool)
 signal blob_void_died(blob_id: int, blob_name: String)
 signal stack_respawned()
+signal target_lock_changed(blob_id: int, blob_name: String, is_locked: bool)
+signal stack_swap_completed(new_leader_id: int, new_leader_name: String)
 
 @export_group("Movement & Jump")
 @export var move_speed: float = 12.5
@@ -43,6 +45,12 @@ signal stack_respawned()
 @export var recall_spring_damping: float = 17.0
 @export var recall_initial_pop: float = 12.5
 
+@export_group("Stack Swap Swoop (F)")
+@export var max_target_distance: float = 42.0
+@export var max_reticle_radius: float = 0.35
+@export var stack_swap_cooldown_duration: float = 0.85
+@export var swoop_target_glide_cap: float = 10.0
+
 @export_group("Stack & Springs")
 @export var follower_spring_stiffness: float = 260.0
 @export var follower_spring_damping: float = 17.0
@@ -61,6 +69,8 @@ class StackBlob:
 	var visual_root: Node3D
 	var mesh_inst: MeshInstance3D
 	var material: StandardMaterial3D
+	var outline_mesh: MeshInstance3D
+	var outline_mat: StandardMaterial3D
 	var velocity: Vector3 = Vector3.ZERO
 	var squash: Vector3 = Vector3.ZERO
 	var spring_pos: Vector3 = Vector3.ZERO
@@ -75,10 +85,18 @@ class StackBlob:
 var _all_nodes: Array[StackBlob] = []
 var _active_nodes: Array[StackBlob] = []
 var _ejected_nodes: Array[StackBlob] = []
-var _dead_nodes: Dictionary = {} # StackBlob -> true
+var _dead_nodes: Dictionary = {}
+var _locked_ejected_nodes: Dictionary = {}
+
+var _highlighted_ejected_node: StackBlob = null
+var _stack_swoop_target: StackBlob = null
+var _stack_swoop_time: float = 0.0
+var _stack_swoop_blocked_time: float = 0.0
+var _stack_swoop_dir: Vector3 = Vector3.ZERO
+var _stack_swap_cooldown: float = 0.0
 
 var _leader_vel: Vector3 = Vector3.ZERO
-var _facing_angle: float = PI # Facing -Z initially
+var _facing_angle: float = PI
 var _is_grounded: bool = false
 var _coyote_timer: float = 0.0
 var _jump_buffer_timer: float = 0.0
@@ -88,6 +106,7 @@ var _was_jump_down: bool = false
 var _was_eject_down: bool = false
 var _was_roll_down: bool = false
 var _was_recall_down: bool = false
+var _was_swap_down: bool = false
 
 var _is_sprint_rolling: bool = false
 var _roll_blend: float = 0.0
@@ -97,7 +116,6 @@ var _roll_exit_timer: float = 0.0
 var _launch_momentum_timer: float = 0.0
 var _elapsed: float = 0.0
 
-# Camera shake spring state
 var camera_shake_offset: Vector3 = Vector3.ZERO
 var _camera_shake_vel: Vector3 = Vector3.ZERO
 
@@ -156,6 +174,25 @@ func _build_blobs() -> void:
 		mesh_inst.material_override = mat
 		visual_root.add_child(mesh_inst)
 
+		# Inverted-hull white reticle lock-on outline
+		var outline_mesh := MeshInstance3D.new()
+		var outline_sphere := SphereMesh.new()
+		outline_sphere.radius = blob.radius * 1.15
+		outline_sphere.height = blob.radius * 2.30
+		outline_sphere.radial_segments = 24
+		outline_sphere.rings = 16
+		outline_mesh.mesh = outline_sphere
+		outline_mesh.scale = Vector3(1.08, 0.92, 1.08)
+
+		var outline_mat := StandardMaterial3D.new()
+		outline_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		outline_mat.cull_mode = BaseMaterial3D.CULL_FRONT
+		outline_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		outline_mat.albedo_color = Color(1.0, 1.0, 1.0, 0.9)
+		outline_mesh.material_override = outline_mat
+		outline_mesh.visible = false
+		visual_root.add_child(outline_mesh)
+
 		var eye_mesh := SphereMesh.new()
 		eye_mesh.radius = blob.radius * 0.12
 		eye_mesh.height = blob.radius * 0.24
@@ -177,6 +214,8 @@ func _build_blobs() -> void:
 		blob.visual_root = visual_root
 		blob.mesh_inst = mesh_inst
 		blob.material = mat
+		blob.outline_mesh = outline_mesh
+		blob.outline_mat = outline_mat
 
 		_all_nodes.append(blob)
 
@@ -187,7 +226,6 @@ func _sync_collider_states() -> void:
 	for idx in range(_active_nodes.size()):
 		var b := _active_nodes[idx]
 		b.body.visible = true
-		# Only the lead driver (index 0) uses physics collision while stacked so followers glide smoothly
 		b.col_shape.disabled = (idx != 0)
 
 	for b in _ejected_nodes:
@@ -197,6 +235,9 @@ func _sync_collider_states() -> void:
 
 func is_blob_dead(blob: StackBlob) -> bool:
 	return _dead_nodes.has(blob)
+
+func get_highlighted_ejected_blob() -> StackBlob:
+	return _highlighted_ejected_node
 
 func get_leader_position() -> Vector3:
 	if _active_nodes.is_empty():
@@ -229,8 +270,13 @@ func _update_camera_shake(delta: float) -> void:
 		_camera_shake_vel = Vector3.ZERO
 
 func respawn(spawn_point: Vector3) -> void:
+	_cancel_stack_swoop()
+	_stack_swap_cooldown = 0.0
+	_set_highlighted_target(null)
 	_dead_nodes.clear()
+	_locked_ejected_nodes.clear()
 	_ejected_nodes.clear()
+
 	_active_nodes = _all_nodes.duplicate()
 	_active_nodes.sort_custom(func(a: StackBlob, b: StackBlob) -> bool: return a.id < b.id)
 
@@ -251,6 +297,7 @@ func respawn(spawn_point: Vector3) -> void:
 	var current_y := spawn_point.y
 	for blob in _active_nodes:
 		blob.body.visible = true
+		blob.outline_mesh.visible = false
 		blob.is_rolling = false
 		blob.is_recalling = false
 		blob.recall_time = 0.0
@@ -274,7 +321,7 @@ func respawn(spawn_point: Vector3) -> void:
 	_sync_collider_states()
 	stack_respawned.emit()
 
-# --- Input Helpers (Action + Direct Key Fallbacks) ---
+# --- Input Helpers ---
 
 func _read_move_axes() -> Vector2:
 	var x := 0.0
@@ -317,14 +364,21 @@ func _read_roll_held() -> bool:
 func _read_recall_held() -> bool:
 	return (InputMap.has_action("recall") and Input.is_action_pressed("recall")) or Input.is_physical_key_pressed(KEY_R)
 
+func _read_swap_held() -> bool:
+	return (InputMap.has_action("swap_swoop") and Input.is_action_pressed("swap_swoop")) or Input.is_physical_key_pressed(KEY_F)
+
 # --- Main Fixed-Timestep Update ---
 
-func step_stack(delta: float, camera_yaw: float) -> void:
+func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> void:
 	_elapsed += delta
 	if _active_nodes.is_empty():
 		return
 
-	# Edge-triggered action sampling
+	_stack_swap_cooldown = maxf(0.0, _stack_swap_cooldown - delta)
+
+	if camera != null:
+		update_target_highlight(camera)
+
 	var jump_down := _read_jump_held()
 	var jump_just_pressed := jump_down and not _was_jump_down
 	_was_jump_down = jump_down
@@ -342,6 +396,10 @@ func step_stack(delta: float, camera_yaw: float) -> void:
 	var recall_just_pressed := recall_down and not _was_recall_down
 	_was_recall_down = recall_down
 
+	var swap_down := _read_swap_held()
+	var swap_just_pressed := swap_down and not _was_swap_down
+	_was_swap_down = swap_down
+
 	if jump_just_pressed:
 		_jump_buffer_timer = jump_buffer_time_max
 	else:
@@ -353,9 +411,9 @@ func step_stack(delta: float, camera_yaw: float) -> void:
 		respawn(Vector3.ZERO)
 		return
 
-	# Update facing_angle from movement input BEFORE eject/roll actions so launches aim cleanly
+	# Update facing_angle from current frame input BEFORE eject/roll actions
 	var axes := _read_move_axes()
-	if not is_zero_approx(axes.x) or not is_zero_approx(axes.y):
+	if _stack_swoop_target == null and (not is_zero_approx(axes.x) or not is_zero_approx(axes.y)):
 		var sin_y := sin(camera_yaw)
 		var cos_y := cos(camera_yaw)
 		var world_x := cos_y * axes.x + (-sin_y) * (-axes.y)
@@ -363,18 +421,515 @@ func step_stack(delta: float, camera_yaw: float) -> void:
 		if Vector2(world_x, world_z).length() > 0.0001:
 			_facing_angle = atan2(world_x, world_z)
 
-	if eject_just_pressed:
-		eject_top_character()
+	if swap_just_pressed and _stack_swoop_target == null:
+		initiate_stack_swap_swoop()
 
-	if roll_just_pressed:
-		roll_bottom_character()
+	if _stack_swoop_target == null:
+		if eject_just_pressed:
+			eject_top_character()
+		if roll_just_pressed:
+			roll_bottom_character()
 
 	if recall_just_pressed:
 		recall_all()
 
-	_update_active_stack(delta, axes, camera_yaw)
+	if _stack_swoop_target != null:
+		_update_stack_swoop(delta)
+	else:
+		_update_active_stack(delta, axes, camera_yaw)
+
 	_update_ejected_characters(delta)
+	_update_highlight_visuals()
 	_update_camera_shake(delta)
+
+# --- Reticle Target Lock & Stack-Swap Swoop (F) ---
+
+func _set_highlighted_target(target: StackBlob) -> void:
+	if _highlighted_ejected_node == target:
+		return
+	if _highlighted_ejected_node != null:
+		_highlighted_ejected_node.outline_mesh.visible = false
+	_highlighted_ejected_node = target
+	if target != null:
+		target.outline_mesh.visible = true
+		target_lock_changed.emit(target.id, target.blob_name, true)
+	else:
+		target_lock_changed.emit(-1, "", false)
+
+func update_target_highlight(camera: Camera3D) -> void:
+	if (
+		_stack_swoop_target != null
+		and _ejected_nodes.has(_stack_swoop_target)
+		and not _locked_ejected_nodes.has(_stack_swoop_target)
+		and not _dead_nodes.has(_stack_swoop_target)
+	):
+		_set_highlighted_target(_stack_swoop_target)
+		return
+
+	if _active_nodes.is_empty() or _ejected_nodes.is_empty() or _stack_swap_cooldown > 0.0:
+		_set_highlighted_target(null)
+		return
+
+	var driver := _active_nodes[0]
+	var cam_pos := camera.global_position
+	var cam_forward := -camera.global_transform.basis.z
+	var viewport_size := camera.get_viewport().get_visible_rect().size
+	if viewport_size.x <= 0.0 or viewport_size.y <= 0.0:
+		_set_highlighted_target(null)
+		return
+
+	var best_blob: StackBlob = null
+	var best_reticle_dist := max_reticle_radius
+	var exclude_rids := _get_all_blob_rids()
+	var space_state := get_world_3d().direct_space_state
+
+	for b in _ejected_nodes:
+		if _locked_ejected_nodes.has(b) or _dead_nodes.has(b) or b.is_recalling:
+			continue
+
+		var blob_pos := b.body.global_position
+		if driver.body.global_position.distance_to(blob_pos) > max_target_distance:
+			continue
+
+		# Must be in front of camera
+		var to_blob := blob_pos - cam_pos
+		if to_blob.dot(cam_forward) <= 0.0:
+			continue
+
+		# Project to normalized NDC (-1..1) around screen center
+		var screen_pos := camera.unproject_position(blob_pos)
+		var ndc_x := (screen_pos.x / viewport_size.x) * 2.0 - 1.0
+		var ndc_y := (screen_pos.y / viewport_size.y) * 2.0 - 1.0
+		var reticle_dist := Vector2(ndc_x, ndc_y).length()
+		if reticle_dist > best_reticle_dist:
+			continue
+
+		# Line-of-sight occlusion raycast from camera to blob
+		var cam_to_blob_dist := to_blob.length()
+		if cam_to_blob_dist > b.radius * 1.1:
+			var ray_end := cam_pos + to_blob.normalized() * (cam_to_blob_dist - b.radius * 1.1)
+			var ray_query := PhysicsRayQueryParameters3D.create(cam_pos, ray_end)
+			ray_query.exclude = exclude_rids
+			ray_query.collide_with_areas = false
+			var hit := space_state.intersect_ray(ray_query)
+			if not hit.is_empty():
+				continue
+
+		best_reticle_dist = reticle_dist
+		best_blob = b
+
+	_set_highlighted_target(best_blob)
+
+func _update_highlight_visuals() -> void:
+	var pulse := 0.5 + 0.5 * sin(_elapsed * 9.0)
+	for b in _all_nodes:
+		var is_target := (
+			_highlighted_ejected_node == b
+			and _ejected_nodes.has(b)
+			and not _dead_nodes.has(b)
+		)
+		b.outline_mesh.visible = is_target
+		if is_target:
+			var outline_scale := 1.0 + pulse * 0.05
+			b.outline_mesh.scale = Vector3(1.08, 0.92, 1.08) * outline_scale
+			b.outline_mat.albedo_color.a = 0.78 + pulse * 0.17
+
+func _is_swoop_path_occluded(from_pos: Vector3, to_pos: Vector3, target_radius: float) -> bool:
+	var diff := to_pos - from_pos
+	var dist := diff.length()
+	if dist <= target_radius * 1.2:
+		return false
+
+	var ray_end := from_pos + diff.normalized() * (dist - target_radius * 0.9)
+	var ray_query := PhysicsRayQueryParameters3D.create(from_pos, ray_end)
+	ray_query.exclude = _get_all_blob_rids()
+	ray_query.collide_with_areas = false
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray_query)
+	return not hit.is_empty()
+
+func initiate_stack_swap_swoop() -> bool:
+	if _stack_swap_cooldown > 0.0 or _active_nodes.is_empty():
+		return false
+
+	var target := _highlighted_ejected_node
+	var bottom := _active_nodes[0]
+	if (
+		target == null
+		or not _ejected_nodes.has(target)
+		or _locked_ejected_nodes.has(target)
+		or _dead_nodes.has(target)
+		or target.is_recalling
+	):
+		return false
+
+	# Clamp runaway sprint-roll glide speed on lock-on
+	var target_horiz_spd := Vector2(target.velocity.x, target.velocity.z).length()
+	if target_horiz_spd > swoop_target_glide_cap:
+		var ratio := swoop_target_glide_cap / target_horiz_spd
+		target.velocity.x *= ratio
+		target.velocity.z *= ratio
+
+	var landing_pos := Vector3(
+		target.body.global_position.x,
+		target.body.global_position.y + target.radius + bottom.radius * 0.92,
+		target.body.global_position.z
+	)
+	var to_target := landing_pos - bottom.body.global_position
+	var dist := to_target.length()
+	if dist > 0.001:
+		to_target /= dist
+	else:
+		to_target = Vector3(sin(_facing_angle), 0.5, cos(_facing_angle)).normalized()
+
+	if dist <= target.radius + bottom.radius + 0.95:
+		_complete_stack_swap_docking(target)
+		return true
+
+	_stack_swoop_target = target
+	_stack_swap_cooldown = stack_swap_cooldown_duration
+	_stack_swoop_time = 0.0
+	_stack_swoop_blocked_time = 0.0
+
+	var side_sign := 1.0 if randf() < 0.5 else -1.0
+	var perp_x := -to_target.z * side_sign
+	var perp_z := to_target.x * side_sign
+	_stack_swoop_dir = Vector3(perp_x * 0.65, 0.75, perp_z * 0.65).normalized()
+
+	var clamped_spd := Vector2(target.velocity.x, target.velocity.z).length()
+	var launch_spd := clampf(dist * 1.35 + clamped_spd * 0.6, 20.0, 30.0)
+	var upward_boost := (recall_initial_pop + to_target.y * 12.0) if to_target.y > 0.1 else (recall_initial_pop + 2.5)
+
+	_leader_vel = Vector3(
+		to_target.x * launch_spd + perp_x * 5.5,
+		maxf(_leader_vel.y * 0.35, upward_boost),
+		to_target.z * launch_spd + perp_z * 5.5
+	)
+	_is_grounded = false
+	_coyote_timer = 0.0
+
+	if Vector2(to_target.x, to_target.z).length() > 0.05:
+		_facing_angle = atan2(to_target.x, to_target.z)
+
+	for idx in range(_active_nodes.size()):
+		var b := _active_nodes[idx]
+		b.is_grounded = false
+		b.pivot.rotation.y = _facing_angle
+		_apply_squash(b, -0.24 + idx * 0.02, 0.28 - idx * 0.02)
+		b.spring_vel.y = 18.0 + float(idx) * 2.5
+
+	trigger_camera_shake(Vector3(-to_target.x * 0.45, 0.2, -to_target.z * 0.45))
+	return true
+
+func _cancel_stack_swoop() -> void:
+	_stack_swoop_target = null
+	_stack_swoop_time = 0.0
+	_stack_swoop_blocked_time = 0.0
+	_set_highlighted_target(null)
+	for b in _active_nodes:
+		b.visual_root.rotation.z = 0.0
+		b.visual_root.rotation.x = 0.0
+
+func _update_stack_swoop(delta: float) -> void:
+	var bottom := _active_nodes[0]
+	var target := _stack_swoop_target
+	if (
+		target == null
+		or not _ejected_nodes.has(target)
+		or _locked_ejected_nodes.has(target)
+		or _dead_nodes.has(target)
+		or target.is_recalling
+	):
+		_cancel_stack_swoop()
+		return
+
+	_is_sprint_rolling = _read_sprint_held()
+	_roll_blend = lerpf(_roll_blend, 1.0 if _is_sprint_rolling else 0.0, 1.0 - exp(-26.0 * delta))
+
+	_stack_swoop_time += delta
+
+	var landing_pos := Vector3(
+		target.body.global_position.x,
+		target.body.global_position.y + target.radius + bottom.radius * 0.92,
+		target.body.global_position.z
+	)
+	var raw_disp := landing_pos - bottom.body.global_position
+	var dist := raw_disp.length()
+
+	if dist <= target.radius + bottom.radius + 0.95:
+		_complete_stack_swap_docking(target)
+		return
+
+	if _stack_swoop_time > 0.12 and _is_swoop_path_occluded(bottom.body.global_position, target.body.global_position, target.radius):
+		_leader_vel.x *= 0.25
+		_leader_vel.z *= 0.25
+		_cancel_stack_swoop()
+		return
+
+	var lead_seconds := clampf(dist / 90.0, 0.01, 0.06)
+	var predicted_target := landing_pos + target.velocity * lead_seconds
+
+	var swoop_fade := exp(-_stack_swoop_time * 5.0) * clampf(dist / 5.0, 0.0, 1.0)
+	var curved_target := predicted_target + _stack_swoop_dir * (swoop_fade * minf(4.0, dist * 0.36))
+	var disp := curved_target - bottom.body.global_position
+
+	var urgency := 1.0 + minf(2.4, _stack_swoop_time * 2.5)
+	var stiffness := recall_spring_stiffness * urgency
+	var damping := recall_spring_damping * (1.0 + minf(0.6, _stack_swoop_time * 0.7))
+
+	var accel_vec := disp * stiffness - _leader_vel * damping
+	_leader_vel += accel_vec * delta
+
+	var target_spd := target.velocity.length()
+	var min_closing := minf(
+		recall_max_speed,
+		maxf(recall_base_speed, target_spd + recall_closing_margin) + _stack_swoop_time * 18.0
+	)
+
+	var to_real_target := raw_disp.normalized()
+	var closing_vel := _leader_vel.dot(to_real_target)
+	if closing_vel < min_closing:
+		var boost := minf(min_closing - closing_vel, 95.0 * delta)
+		_leader_vel += to_real_target * boost
+
+	var spd := _leader_vel.length()
+	if spd > recall_max_speed:
+		_leader_vel = _leader_vel.normalized() * recall_max_speed
+
+	var pre_pos := bottom.body.global_position
+	bottom.body.velocity = _leader_vel
+	bottom.body.move_and_slide()
+	_is_grounded = bottom.body.is_on_floor()
+	_leader_vel = bottom.body.velocity
+
+	var moved_dist := bottom.body.global_position.distance_to(pre_pos)
+	var expected_dist := spd * delta
+	if expected_dist > 0.001 and moved_dist < expected_dist * 0.25:
+		_stack_swoop_blocked_time += delta
+		if _stack_swoop_blocked_time >= 0.14:
+			_leader_vel.x = 0.0
+			_leader_vel.z = 0.0
+			_cancel_stack_swoop()
+			return
+	else:
+		_stack_swoop_blocked_time = 0.0
+
+	var post_dist := bottom.body.global_position.distance_to(landing_pos)
+	if post_dist <= target.radius + bottom.radius + 0.95:
+		_complete_stack_swap_docking(target)
+		return
+
+	# Banking, pitch & aerodynamic stretch
+	var horiz_spd := Vector2(_leader_vel.x, _leader_vel.z).length()
+	if horiz_spd > 0.3:
+		var target_yaw := atan2(_leader_vel.x, _leader_vel.z)
+		_facing_angle = target_yaw
+		var yaw_diff := fposmod(target_yaw - bottom.pivot.rotation.y + PI, TAU) - PI
+		var bank_angle := clampf(-yaw_diff * 0.85, -0.55, 0.55)
+		bottom.pivot.rotation.y = _lerp_angle(bottom.pivot.rotation.y, target_yaw, 18.0 * delta)
+		bottom.visual_root.rotation.z = _lerp_angle(bottom.visual_root.rotation.z, bank_angle, 14.0 * delta)
+	else:
+		bottom.visual_root.rotation.z = _lerp_angle(bottom.visual_root.rotation.z, 0.0, 14.0 * delta)
+
+	var target_pitch := clampf(-_leader_vel.y * 0.032, -0.65, 0.65)
+	bottom.visual_root.rotation.x = _lerp_angle(bottom.visual_root.rotation.x, target_pitch, 18.0 * delta)
+
+	var speed_ratio := clampf(spd / 36.0, 0.0, 1.0)
+	var prox_squash := ((1.0 - post_dist / 2.2) * 0.12) if post_dist < 2.2 else 0.0
+	var stretch := speed_ratio * 0.24 - prox_squash
+	bottom.squash = bottom.squash.lerp(Vector3.ZERO, minf(1.0, 16.0 * delta))
+	bottom.visual_root.scale = Vector3(
+		1.0 - stretch * 0.45 + bottom.squash.x,
+		1.0 - stretch * 0.45 + bottom.squash.y,
+		1.0 + stretch + bottom.squash.z
+	)
+
+	_update_squash_springs(delta)
+
+	var back_x := -sin(_facing_angle)
+	var back_z := -cos(_facing_angle)
+	for i in range(1, _active_nodes.size()):
+		var ahead := _active_nodes[i - 1]
+		var curr := _active_nodes[i]
+
+		var spacing := (ahead.radius + curr.radius) * 0.68
+		var target_x := ahead.body.global_position.x + back_x * spacing
+		var target_y := ahead.body.global_position.y + (0.15 if _is_sprint_rolling else ahead.radius * 0.85 + curr.radius * 0.55)
+		var target_z := ahead.body.global_position.z + back_z * spacing
+
+		var follow_t := 1.0 - exp(-26.0 * delta)
+		curr.body.global_position = curr.body.global_position.lerp(Vector3(target_x, target_y, target_z), follow_t)
+
+		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, bottom.pivot.rotation.y, 18.0 * delta)
+		curr.visual_root.rotation.x = _lerp_angle(curr.visual_root.rotation.x, target_pitch, 18.0 * delta)
+		curr.visual_root.rotation.z = _lerp_angle(curr.visual_root.rotation.z, bottom.visual_root.rotation.z, 14.0 * delta)
+
+		curr.squash = curr.squash.lerp(Vector3.ZERO, minf(1.0, 16.0 * delta))
+		curr.visual_root.scale = Vector3(
+			1.0 - stretch * 0.4 + curr.squash.x,
+			1.0 - stretch * 0.4 + curr.squash.y,
+			1.0 + stretch * 0.9 + curr.squash.z
+		)
+
+	if _stack_swoop_time > 2.6:
+		_cancel_stack_swoop()
+
+func _complete_stack_swap_docking(target_node: StackBlob) -> void:
+	_stack_swoop_target = null
+	_stack_swoop_time = 0.0
+	_stack_swoop_blocked_time = 0.0
+	_stack_swap_cooldown = stack_swap_cooldown_duration
+	_set_highlighted_target(null)
+
+	var ejected_idx := _ejected_nodes.find(target_node)
+	if ejected_idx != -1:
+		_ejected_nodes.remove_at(ejected_idx)
+
+	var incoming_vel := _leader_vel
+	var target_feet_y := target_node.body.global_position.y - target_node.radius * 0.92
+	var anchor_x := target_node.body.global_position.x
+	var anchor_z := target_node.body.global_position.z
+
+	var carry_factor := 0.55 if _is_sprint_rolling else 0.42
+	var carry_vx := target_node.velocity.x * 0.75 + incoming_vel.x * carry_factor
+	var carry_vz := target_node.velocity.z * 0.75 + incoming_vel.z * carry_factor
+
+	var max_carry := sprint_roll_speed if _is_sprint_rolling else move_speed * 1.15
+	var carry_spd := Vector2(carry_vx, carry_vz).length()
+	if carry_spd > max_carry:
+		var ratio := max_carry / carry_spd
+		carry_vx *= ratio
+		carry_vz *= ratio
+
+	if carry_spd > 2.0:
+		_launch_momentum_timer = 0.22
+
+	_leader_vel = Vector3(carry_vx, minf(0.0, target_node.velocity.y), carry_vz)
+	_is_grounded = target_node.is_grounded
+	_coyote_timer = coyote_time_max if target_node.is_grounded else 0.0
+
+	if Vector2(carry_vx, carry_vz).length() > 0.5:
+		_facing_angle = atan2(carry_vx, carry_vz)
+
+	_active_nodes.push_front(target_node)
+
+	var impact_horiz := Vector2(incoming_vel.x, incoming_vel.z)
+	if impact_horiz.length_squared() < 0.25:
+		impact_horiz = Vector2(sin(_facing_angle), cos(_facing_angle))
+	else:
+		impact_horiz = impact_horiz.normalized()
+
+	var jiggle_mag := 14.0
+	var current_feet_y := target_feet_y
+	var back_x := -sin(_facing_angle)
+	var back_z := -cos(_facing_angle)
+	var trail_dist := 0.0
+	var total_count := float(_active_nodes.size())
+
+	for idx in range(_active_nodes.size()):
+		var b := _active_nodes[idx]
+		var tier_ratio := float(idx + 1) / total_count
+		var alt_sign := 1.0 if (idx % 2 == 0) else -1.0
+
+		b.is_rolling = false
+		b.is_recalling = false
+		b.recall_time = 0.0
+		b.eject_cooldown = 0.0
+		b.visual_root.scale = Vector3.ONE
+		b.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
+		b.visual_root.rotation = Vector3.ZERO
+
+		if _is_sprint_rolling and idx > 0:
+			var prev := _active_nodes[idx - 1]
+			trail_dist += (prev.radius + b.radius) * roll_spacing_factor
+			b.body.global_position = Vector3(
+				anchor_x + back_x * trail_dist,
+				target_feet_y + b.radius * 0.92,
+				anchor_z + back_z * trail_dist
+			)
+			b.velocity = Vector3(impact_horiz.x * jiggle_mag * 0.55, 0.0, impact_horiz.y * jiggle_mag * 0.55)
+		else:
+			b.body.global_position = Vector3(anchor_x, current_feet_y + b.radius * 0.92, anchor_z)
+			b.velocity = Vector3(
+				0.0 if idx == 0 else impact_horiz.x * jiggle_mag * 0.65 * tier_ratio,
+				0.0,
+				0.0 if idx == 0 else impact_horiz.y * jiggle_mag * 0.65 * tier_ratio
+			)
+
+		var squash_amt := 0.34 * (1.0 - float(idx) * 0.14)
+		_apply_squash(b, squash_amt, -squash_amt * 0.92)
+		b.spring_vel.y = 22.0 * (1.0 - float(idx) * 0.12)
+		b.spring_vel.x = impact_horiz.x * jiggle_mag * 0.85 * alt_sign
+		b.spring_vel.z = impact_horiz.y * jiggle_mag * 0.85 * alt_sign
+
+		current_feet_y += b.radius * 1.85
+
+	_sync_collider_states()
+	trigger_camera_shake(Vector3(impact_horiz.x * 0.42, -0.28, impact_horiz.y * 0.42))
+	stack_swap_completed.emit(target_node.id, target_node.blob_name)
+
+func promote_to_base(target_node: StackBlob) -> void:
+	if _dead_nodes.has(target_node):
+		return
+	if not _active_nodes.has(target_node) and not _ejected_nodes.has(target_node):
+		return
+
+	_set_highlighted_target(null)
+	if _stack_swoop_target == target_node:
+		_stack_swoop_target = null
+
+	var ejected_idx := _ejected_nodes.find(target_node)
+	var was_ejected := ejected_idx != -1
+
+	var old_bottom := _active_nodes[0]
+	var old_feet_y := old_bottom.body.global_position.y - old_bottom.radius * 0.92
+	var target_feet_y := (target_node.body.global_position.y - target_node.radius * 0.92) if was_ejected else old_feet_y
+	var anchor_x := target_node.body.global_position.x if was_ejected else old_bottom.body.global_position.x
+	var anchor_z := target_node.body.global_position.z if was_ejected else old_bottom.body.global_position.z
+
+	if was_ejected:
+		_ejected_nodes.remove_at(ejected_idx)
+		_leader_vel = Vector3(
+			target_node.velocity.x * 0.65,
+			maxf(target_node.velocity.y * 0.5, 4.0),
+			target_node.velocity.z * 0.65
+		)
+		_is_grounded = false
+	else:
+		var active_idx := _active_nodes.find(target_node)
+		if active_idx != -1:
+			_active_nodes.remove_at(active_idx)
+
+	_active_nodes.push_front(target_node)
+
+	var current_feet_y := target_feet_y
+	var back_x := -sin(_facing_angle)
+	var back_z := -cos(_facing_angle)
+	var trail_dist := 0.0
+
+	for idx in range(_active_nodes.size()):
+		var b := _active_nodes[idx]
+		b.is_rolling = false
+		b.is_recalling = false
+		b.recall_time = 0.0
+		b.velocity = Vector3.ZERO
+		b.eject_cooldown = 0.0
+		b.visual_root.scale = Vector3.ONE
+		b.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
+		b.visual_root.rotation = Vector3.ZERO
+		if _is_sprint_rolling and idx > 0:
+			var prev := _active_nodes[idx - 1]
+			trail_dist += (prev.radius + b.radius) * roll_spacing_factor
+			b.body.global_position = Vector3(
+				anchor_x + back_x * trail_dist,
+				target_feet_y + b.radius * 0.92,
+				anchor_z + back_z * trail_dist
+			)
+		else:
+			b.body.global_position = Vector3(anchor_x, current_feet_y + b.radius * 0.92, anchor_z)
+		_apply_squash(b, 0.32 - float(idx) * 0.05, -0.28 + float(idx) * 0.04)
+		current_feet_y += b.radius * 1.85
+
+	_sync_collider_states()
 
 # --- Eject Top (E) & Roll Bottom (C / Ctrl) ---
 
@@ -488,14 +1043,12 @@ func roll_bottom_character() -> StackBlob:
 	var new_driver := _active_nodes[0]
 	var cur_horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
 
-	# Keep new base driver centered on the stack anchor so it never snaps sideways
 	new_driver.body.global_position = Vector3(
 		anchor_x,
 		anchor_feet_y + new_driver.radius * 0.92,
 		anchor_z
 	)
 
-	# Spawn rolled ball at floor level with wall-safe forward clearance
 	var ball_center_y := anchor_feet_y + bottom_node.radius * 0.92
 	var desired_clearance := new_driver.radius + bottom_node.radius + 0.14
 	var exclude_rids := _get_all_blob_rids()
@@ -552,7 +1105,6 @@ func roll_bottom_character() -> StackBlob:
 			_leader_vel.x *= ratio
 			_leader_vel.z *= ratio
 	else:
-		# Subtle backward recoil when standing/walking
 		_is_grounded = false
 		_coyote_timer = coyote_time_max
 		_leader_vel = Vector3(
@@ -605,9 +1157,12 @@ func _get_recall_target_position() -> Vector3:
 	)
 
 func recall_all() -> void:
+	if _stack_swoop_target != null:
+		_cancel_stack_swoop()
+
 	var recallable: Array[StackBlob] = []
 	for b in _ejected_nodes:
-		if not _dead_nodes.has(b):
+		if not _locked_ejected_nodes.has(b) and not _dead_nodes.has(b):
 			recallable.append(b)
 
 	if recallable.is_empty():
@@ -617,6 +1172,9 @@ func recall_all() -> void:
 
 	for idx in range(recallable.size()):
 		var b := recallable[idx]
+		if _highlighted_ejected_node == b:
+			_set_highlighted_target(null)
+
 		var to_target := target_center - b.body.global_position
 		var dist := to_target.length()
 		if dist > 0.001:
@@ -651,6 +1209,11 @@ func _reabsorb_blob(ejected_index: int) -> void:
 	var blob: StackBlob = _ejected_nodes[ejected_index]
 	_ejected_nodes.remove_at(ejected_index)
 
+	if _highlighted_ejected_node == blob:
+		_set_highlighted_target(null)
+	if _stack_swoop_target == blob:
+		_stack_swoop_target = null
+
 	var current_top: StackBlob = _active_nodes[_active_nodes.size() - 1]
 	var incoming_vel := blob.velocity
 	var was_recalling := blob.is_recalling
@@ -658,6 +1221,7 @@ func _reabsorb_blob(ejected_index: int) -> void:
 	blob.is_rolling = false
 	blob.is_recalling = false
 	blob.recall_time = 0.0
+	blob.visual_root.scale = Vector3.ONE
 	blob.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
 	blob.visual_root.rotation = Vector3.ZERO
 
@@ -695,7 +1259,6 @@ func _reabsorb_blob(ejected_index: int) -> void:
 			impact_horiz.y * jiggle_mag
 		)
 
-	# Cascading gelatin jiggle wave through the stack on dock
 	var total_count := float(_active_nodes.size() + 1)
 	for idx in range(_active_nodes.size()):
 		var existing := _active_nodes[idx]
@@ -712,7 +1275,6 @@ func _reabsorb_blob(ejected_index: int) -> void:
 			existing.velocity.x += impact_horiz.x * jiggle_mag * 0.65 * tier_ratio
 			existing.velocity.z += impact_horiz.y * jiggle_mag * 0.65 * tier_ratio
 
-	# Top-cap wobble on the arriving blob
 	_apply_squash(blob, 0.38 if was_recalling else 0.24, -0.34 if was_recalling else -0.22)
 	blob.spring_vel.y = 24.0 if was_recalling else 14.0
 	blob.spring_vel.x = -impact_horiz.x * jiggle_mag * 0.8
@@ -731,22 +1293,25 @@ func _reabsorb_blob(ejected_index: int) -> void:
 func _update_ejected_characters(delta: float) -> void:
 	for i in range(_ejected_nodes.size() - 1, -1, -1):
 		var b := _ejected_nodes[i]
-		if _dead_nodes.has(b):
+		if _dead_nodes.has(b) or _locked_ejected_nodes.has(b):
 			continue
 
-		# 1. Void-death check (y < -12)
 		if b.body.global_position.y < void_death_y:
 			_dead_nodes[b] = true
 			b.body.visible = false
+			b.outline_mesh.visible = false
 			b.col_shape.disabled = true
 			b.is_recalling = false
 			b.recall_time = 0.0
 			b.is_rolling = false
 			b.velocity = Vector3.ZERO
+			if _highlighted_ejected_node == b:
+				_set_highlighted_target(null)
+			if _stack_swoop_target == b:
+				_cancel_stack_swoop()
 			blob_void_died.emit(b.id, b.blob_name)
 			continue
 
-		# 2. Homing swoop recall flight
 		if b.is_recalling:
 			b.recall_time += delta
 			var base_target := _get_recall_target_position()
@@ -771,7 +1336,6 @@ func _update_ejected_characters(delta: float) -> void:
 			var accel_vec := disp * stiffness - b.velocity * damping
 			b.velocity += accel_vec * delta
 
-			# Un-outrunnable minimum closing speed > stack speed
 			var stack_speed := _leader_vel.length()
 			var min_closing := minf(
 				recall_max_speed,
@@ -790,7 +1354,6 @@ func _update_ejected_characters(delta: float) -> void:
 
 			b.body.global_position += b.velocity * delta
 
-			# Aerodynamic banking, pitch & stretch along flight path
 			var horiz_spd := Vector2(b.velocity.x, b.velocity.z).length()
 			if horiz_spd > 0.3:
 				var target_yaw := atan2(b.velocity.x, b.velocity.z)
@@ -815,7 +1378,6 @@ func _update_ejected_characters(delta: float) -> void:
 			)
 			continue
 
-		# 3. Normal Ejected Ball Gravity, Bounce & Rolling Physics
 		b.eject_cooldown = maxf(0.0, b.eject_cooldown - delta)
 
 		var eff_grav := (gravity * 1.5) if b.velocity.y < 0.0 else gravity
@@ -831,7 +1393,6 @@ func _update_ejected_characters(delta: float) -> void:
 			var normal := collision.get_normal()
 			var remainder := collision.get_remainder()
 
-			# Floor hit
 			if normal.y > 0.65:
 				if b.velocity.y < -2.5:
 					b.velocity.y = -b.velocity.y * bounce_restitution
@@ -839,17 +1400,15 @@ func _update_ejected_characters(delta: float) -> void:
 				else:
 					b.velocity.y = 0.0
 					b.is_grounded = true
-			# Ceiling hit
 			elif normal.y < -0.65:
 				if b.velocity.y > 2.5:
 					_apply_squash(b, 0.24, -0.22)
 				b.velocity.y = 0.0
-			# Wall hit
 			else:
 				var wall_n := Vector3(normal.x, 0.0, normal.z).normalized()
 				var into_speed := -b.velocity.dot(wall_n)
 				if into_speed > 0.0:
-					b.velocity += wall_n * into_speed * 1.5 # Reflect with 0.5 restitution
+					b.velocity += wall_n * into_speed * 1.5
 					if into_speed > 2.2:
 						_apply_squash(b, -0.24, 0.22)
 
@@ -864,8 +1423,9 @@ func _update_ejected_characters(delta: float) -> void:
 			b.visual_root.rotation.z = 0.0
 			b.visual_root.rotation.x += (horiz_speed / maxf(0.35, b.radius)) * delta
 
-			if b.is_grounded:
-				var roll_damp := exp(-2.2 * delta)
+			if b.is_grounded or _stack_swoop_target == b:
+				var damp_rate := 14.0 if _stack_swoop_target == b else 2.2
+				var roll_damp := exp(-damp_rate * delta)
 				b.velocity.x *= roll_damp
 				b.velocity.z *= roll_damp
 
@@ -890,13 +1450,11 @@ func _update_ejected_characters(delta: float) -> void:
 					1.0 + breath + b.squash.z
 				)
 
-		# 4. Proximity re-absorption when stack touches ejected blob
-		if b.eject_cooldown <= 0.0:
+		if b.eject_cooldown <= 0.0 and _stack_swoop_target == null:
 			var stack_center := get_stack_center()
 			if stack_center.distance_to(b.body.global_position) <= b.radius + 1.1:
 				_reabsorb_blob(i)
 
-	# 5. Blob-to-blob elastic collisions
 	for i in range(_ejected_nodes.size()):
 		for j in range(i + 1, _ejected_nodes.size()):
 			var a := _ejected_nodes[i]
@@ -958,7 +1516,6 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 			_facing_angle = atan2(_leader_vel.x, _leader_vel.z)
 		bottom.pivot.rotation.y = _facing_angle
 
-		# Tuck trailing blobs directly behind the leader so they form a tight line immediately
 		var back_x := -sin(_facing_angle)
 		var back_z := -cos(_facing_angle)
 		for i in range(1, _active_nodes.size()):
@@ -972,7 +1529,6 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_roll_exit_timer = 0.12
 		_roll_entry_timer = 0.0
 
-		# Keep Blue (id 0) as the base driver when popping back into a vertical stack if present
 		var blue_idx := -1
 		for idx in range(_active_nodes.size()):
 			if _active_nodes[idx].id == 0:
@@ -1198,7 +1754,6 @@ func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roun
 		curr.body.global_position.x += curr.velocity.x * delta
 		curr.body.global_position.z += curr.velocity.z * delta
 
-		# Clamp maximum tether stretch so trailing blobs stay cohesive on sharp turns
 		var offset_x := curr.body.global_position.x - ahead.body.global_position.x
 		var offset_z := curr.body.global_position.z - ahead.body.global_position.z
 		var dist := Vector2(offset_x, offset_z).length()
