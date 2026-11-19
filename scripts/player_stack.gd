@@ -46,10 +46,11 @@ signal stack_swap_completed(new_leader_id: int, new_leader_name: String)
 @export var recall_initial_pop: float = 12.5
 
 @export_group("Stack Swap Swoop (F)")
-@export var max_target_distance: float = 42.0
-@export var max_reticle_radius: float = 0.35
-@export var stack_swap_cooldown_duration: float = 0.85
-@export var swoop_target_glide_cap: float = 10.0
+@export var max_target_distance: float = 48.0
+@export var max_reticle_radius: float = 0.48
+@export var stack_swap_cooldown_duration: float = 0.25
+@export var swoop_target_glide_cap: float = 8.5
+@export var post_swoop_air_pop: float = 11.5
 
 @export_group("Stack & Springs")
 @export var follower_spring_stiffness: float = 260.0
@@ -101,6 +102,8 @@ var _is_grounded: bool = false
 var _coyote_timer: float = 0.0
 var _jump_buffer_timer: float = 0.0
 var _jump_held: bool = false
+var _has_air_combo_jump: bool = false
+var _last_camera: Camera3D = null
 
 var _was_jump_down: bool = false
 var _was_eject_down: bool = false
@@ -377,6 +380,7 @@ func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> voi
 	_stack_swap_cooldown = maxf(0.0, _stack_swap_cooldown - delta)
 
 	if camera != null:
+		_last_camera = camera
 		update_target_highlight(camera)
 
 	var jump_down := _read_jump_held()
@@ -421,7 +425,7 @@ func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> voi
 		if Vector2(world_x, world_z).length() > 0.0001:
 			_facing_angle = atan2(world_x, world_z)
 
-	if swap_just_pressed and _stack_swoop_target == null:
+	if swap_just_pressed and _highlighted_ejected_node != null and _highlighted_ejected_node != _stack_swoop_target:
 		initiate_stack_swap_swoop()
 
 	if _stack_swoop_target == null:
@@ -803,9 +807,14 @@ func _complete_stack_swap_docking(target_node: StackBlob) -> void:
 	if carry_spd > 2.0:
 		_launch_momentum_timer = 0.22
 
-	_leader_vel = Vector3(carry_vx, minf(0.0, target_node.velocity.y), carry_vz)
+	var docked_in_air := not target_node.is_grounded
+	var air_pop_y := post_swoop_air_pop if docked_in_air else 0.0
+	_leader_vel = Vector3(carry_vx, air_pop_y, carry_vz)
 	_is_grounded = target_node.is_grounded
-	_coyote_timer = coyote_time_max if target_node.is_grounded else 0.0
+	_coyote_timer = coyote_time_max
+	_has_air_combo_jump = docked_in_air
+	if docked_in_air:
+		_launch_momentum_timer = 0.28
 
 	if Vector2(carry_vx, carry_vz).length() > 0.5:
 		_facing_angle = atan2(carry_vx, carry_vz)
@@ -954,6 +963,29 @@ func _get_all_blob_rids() -> Array[RID]:
 		rids.append(b.body.get_rid())
 	return rids
 
+func _get_camera_aim_direction() -> Vector3:
+	if _last_camera == null:
+		return Vector3(sin(_facing_angle), 0.38, cos(_facing_angle)).normalized()
+
+	var viewport_size := _last_camera.get_viewport().get_visible_rect().size
+	var screen_center := viewport_size * 0.5
+	var ray_origin := _last_camera.project_ray_origin(screen_center)
+	var ray_dir := _last_camera.project_ray_normal(screen_center)
+
+	# Raycast out to 45m to find what the crosshair is pointing at
+	var space_state := get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(ray_origin, ray_origin + ray_dir * 45.0)
+	query.exclude = _get_all_blob_rids()
+	query.collide_with_areas = false
+	var hit := space_state.intersect_ray(query)
+
+	var aim_point: Vector3 = hit["position"] if not hit.is_empty() else (ray_origin + ray_dir * 28.0)
+	var from_pos := _active_nodes[_active_nodes.size() - 1].body.global_position
+	var to_aim := (aim_point - from_pos)
+	if to_aim.length_squared() < 0.01:
+		return ray_dir
+	return to_aim.normalized()
+
 func eject_top_character() -> StackBlob:
 	if _active_nodes.size() <= 1:
 		return null
@@ -963,12 +995,17 @@ func eject_top_character() -> StackBlob:
 	var stack_anchor: StackBlob = _active_nodes[_active_nodes.size() - 1]
 	var is_sprint_launch := _is_sprint_rolling
 
+	var aim_dir := _get_camera_aim_direction()
+	var horiz_aim := Vector2(aim_dir.x, aim_dir.z)
+	if horiz_aim.length() > 0.05:
+		_facing_angle = atan2(aim_dir.x, aim_dir.z)
+
 	var forward_x := sin(_facing_angle)
 	var forward_z := cos(_facing_angle)
 
 	var origin_node := front_driver if is_sprint_launch else stack_anchor
-	var spawn_y := (front_driver.body.global_position.y + front_driver.radius * 0.35) if is_sprint_launch else top_node.body.global_position.y
-	var desired_offset := (front_driver.radius + top_node.radius * 0.45) if is_sprint_launch else 0.25
+	var spawn_y := (front_driver.body.global_position.y + front_driver.radius * 0.45) if is_sprint_launch else (top_node.body.global_position.y + 0.15)
+	var desired_offset := (front_driver.radius + top_node.radius * 0.45) if is_sprint_launch else 0.35
 
 	var exclude_rids := _get_all_blob_rids()
 	var safe_offset := 0.0
@@ -991,21 +1028,23 @@ func eject_top_character() -> StackBlob:
 		origin_node.body.global_position.z + forward_z * safe_offset
 	)
 
-	var base_fwd := sprint_throw_forward_speed if is_sprint_launch else throw_forward_speed
-	var base_up := sprint_throw_upward_speed if is_sprint_launch else throw_upward_speed
-	var vel_carry := 0.65 if is_sprint_launch else 0.45
+	# Blend camera pitch into throw speed & upward arc so aiming up launches high and clean
+	var pitch_up := clampf(aim_dir.y, -0.35, 0.92)
+	var throw_speed := (32.0 if is_sprint_launch else 24.5) + maxf(0.0, pitch_up) * 8.0
+	var arc_bonus := lerpf(5.5, 9.5, clampf((pitch_up + 0.2) / 1.1, 0.0, 1.0))
+	var vel_carry := 0.55 if is_sprint_launch else 0.35
 
 	top_node.velocity = Vector3(
-		forward_x * base_fwd + _leader_vel.x * vel_carry,
-		base_up + maxf(0.0, _leader_vel.y * 0.35),
-		forward_z * base_fwd + _leader_vel.z * vel_carry
+		aim_dir.x * throw_speed + _leader_vel.x * vel_carry,
+		maxf(6.5, aim_dir.y * throw_speed + arc_bonus) + maxf(0.0, _leader_vel.y * 0.3),
+		aim_dir.z * throw_speed + _leader_vel.z * vel_carry
 	)
 
 	top_node.is_grounded = false
 	top_node.is_rolling = false
 	top_node.is_recalling = false
 	top_node.recall_time = 0.0
-	top_node.eject_cooldown = 0.45
+	top_node.eject_cooldown = 0.35
 	top_node.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
 	top_node.visual_root.rotation = Vector3.ZERO
 
@@ -1015,8 +1054,8 @@ func eject_top_character() -> StackBlob:
 		0.38 if is_sprint_launch else 0.28
 	)
 
-	var shake_power := 0.72 if is_sprint_launch else 0.45
-	trigger_camera_shake(Vector3(-forward_x * shake_power, 0.26 if is_sprint_launch else 0.18, -forward_z * shake_power))
+	var shake_power := 0.65 if is_sprint_launch else 0.40
+	trigger_camera_shake(Vector3(-forward_x * shake_power, 0.22 if is_sprint_launch else 0.14, -forward_z * shake_power))
 
 	for b in _active_nodes:
 		_apply_squash(b, 0.32 if is_sprint_launch else 0.26, -0.28 if is_sprint_launch else -0.24)
@@ -1025,7 +1064,6 @@ func eject_top_character() -> StackBlob:
 	_sync_collider_states()
 	blob_ejected.emit(top_node.id, top_node.blob_name, false)
 	return top_node
-
 func _find_floor_y(at_pos: Vector3, fallback_feet_y: float, exclude_rids: Array[RID]) -> float:
 	var space_state := get_world_3d().direct_space_state
 	var ray_from := Vector3(at_pos.x, at_pos.y + 1.2, at_pos.z)
@@ -1666,11 +1704,15 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var coyote_limit := coyote_time_max * 1.25 if _is_sprint_rolling else coyote_time_max
 	if _is_grounded:
 		_coyote_timer = coyote_limit
+		_has_air_combo_jump = false
 	else:
 		_coyote_timer = maxf(0.0, _coyote_timer - delta)
 
 	var can_coyote_jump := _coyote_timer > 0.0 and not _is_grounded
-	if (_is_grounded or can_coyote_jump) and _jump_buffer_timer > 0.0:
+	var can_combo_air_jump := _has_air_combo_jump and not _is_grounded
+	if (_is_grounded or can_coyote_jump or can_combo_air_jump) and _jump_buffer_timer > 0.0:
+		if can_combo_air_jump and not can_coyote_jump:
+			_has_air_combo_jump = false
 		_leader_vel.y = jump_force
 		_is_grounded = false
 		_coyote_timer = 0.0
@@ -1868,3 +1910,6 @@ func get_stack_statuses() -> Array[Dictionary]:
 			"is_dead": is_dead,
 		})
 	return out
+
+func is_high_speed_state() -> bool:
+	return _is_sprint_rolling or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25

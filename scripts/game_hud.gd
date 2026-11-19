@@ -222,6 +222,32 @@ class PausePitCanvas extends Control:
 				else:
 					draw_arc(Vector2(s * 0.22, 0.0), s * 0.38, -0.7, 0.7, 12, ink, w * 0.85, true)
 
+class DynamicReticle extends Control:
+	var is_locked: bool = false
+	var anim_t: float = 0.0
+
+	func _process(delta: float) -> void:
+		var target := 1.0 if is_locked else 0.0
+		anim_t = lerpf(anim_t, target, 1.0 - exp(-18.0 * delta))
+		queue_redraw()
+
+	func _draw() -> void:
+		var c := size * 0.5
+		var ring_r := lerpf(9.0, 15.0, anim_t)
+		var ring_col := Color(1.0, 1.0, 1.0, 0.45).lerp(Color("facc15", 0.95), anim_t)
+		var dot_col := Color(1.0, 1.0, 1.0, 0.85).lerp(Color("38bdf8", 1.0), anim_t)
+
+		# Subtle dark backing ring for contrast against bright sky/walls
+		draw_arc(c, ring_r, 0.0, TAU, 32, Color(0.06, 0.09, 0.16, 0.55), 3.5, true)
+		draw_arc(c, ring_r, 0.0, TAU, 32, ring_col, 2.0, true)
+		draw_circle(c, lerpf(2.2, 3.2, anim_t), dot_col)
+
+		if anim_t > 0.15:
+			var tick := lerpf(4.0, 7.0, anim_t)
+			var gap := ring_r + 3.0
+			for dir in [Vector2.UP, Vector2.DOWN, Vector2.LEFT, Vector2.RIGHT]:
+				draw_line(c + dir * gap, c + dir * (gap + tick), ring_col, 2.2, true)
+
 var _font: Font
 var _hud_root: Control
 var _stack_dock: PanelContainer
@@ -230,7 +256,7 @@ var _course_lbl: Label
 var _pb_lbl: Label
 var _timer_lbl: Label
 var _mute_btn: Button
-var _reticle: ColorRect
+var _reticle: DynamicReticle
 
 var _title_overlay: ColorRect
 var _course_modal: ColorRect
@@ -360,16 +386,13 @@ func _build_gameplay_hud() -> void:
 	_hud_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_hud_root)
 
-	# Center Reticle (clean 4x4 dot)
-	_reticle = ColorRect.new()
+	_reticle = DynamicReticle.new()
 	_reticle.name = "Reticle"
 	_reticle.set_anchors_preset(Control.PRESET_CENTER)
-	_reticle.offset_left = -2
-	_reticle.offset_top = -2
-	_reticle.offset_right = 2
-	_reticle.offset_bottom = 2
-	_reticle.pivot_offset = Vector2(2, 2)
-	_reticle.color = Color(1.0, 1.0, 1.0, 0.35)
+	_reticle.offset_left = -28
+	_reticle.offset_top = -28
+	_reticle.offset_right = 28
+	_reticle.offset_bottom = 28
 	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hud_root.add_child(_reticle)
 
@@ -1293,9 +1316,8 @@ func _process(delta: float) -> void:
 func set_reticle_locked(is_locked: bool) -> void:
 	if _reticle == null:
 		return
-	_reticle.color = Color("38bdf8", 0.75) if is_locked else Color(1.0, 1.0, 1.0, 0.35)
-	_reticle.scale = Vector2(1.15, 1.15) if is_locked else Vector2.ONE
-
+	_reticle.is_locked = is_locked
+	
 func update_stack_status(statuses: Array) -> void:
 	var stacked_count := 0
 	var ejected_ids: Array[int] = []
