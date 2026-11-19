@@ -1005,7 +1005,7 @@ func eject_top_character() -> StackBlob:
 
 	var origin_node := front_driver if is_sprint_launch else stack_anchor
 	var spawn_y := (front_driver.body.global_position.y + front_driver.radius * 0.45) if is_sprint_launch else (top_node.body.global_position.y + 0.15)
-	var desired_offset := (front_driver.radius + top_node.radius * 0.45) if is_sprint_launch else 0.35
+	var desired_offset := (front_driver.radius + top_node.radius * 0.55) if is_sprint_launch else 0.65
 
 	var exclude_rids := _get_all_blob_rids()
 	var safe_offset := 0.0
@@ -1538,7 +1538,8 @@ func _update_ejected_characters(delta: float) -> void:
 
 		# Don't accidentally reabsorb a ball that is still actively rolling fast away/ahead
 		var still_fast_rolling := b.is_rolling and horiz_speed > 8.0
-		if b.eject_cooldown <= 0.0 and not still_fast_rolling and _stack_swoop_target == null:
+		var held_in_air_lock := (_highlighted_ejected_node == b) and not b.is_grounded and b.velocity.y > -6.0
+		if b.eject_cooldown <= 0.0 and not still_fast_rolling and not held_in_air_lock and _stack_swoop_target == null:
 			var stack_center := get_stack_center()
 			if stack_center.distance_to(b.body.global_position) <= b.radius + 1.05:
 				_reabsorb_blob(i)

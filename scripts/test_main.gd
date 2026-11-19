@@ -2,29 +2,38 @@ extends Node3D
 
 @onready var player_stack: PlayerStack = get_node_or_null("PlayerStack") as PlayerStack
 
-@export_group("Camera Framing")
+@export_group("Camera Framing & Zoom")
 @export var orbit_sensitivity: float = 0.0036
 @export var key_orbit_speed: float = 2.2
-@export var follow_distance: float = 12.5
-@export var shoulder_offset_x: float = 1.45
-@export var pivot_height: float = 1.75
-@export var look_ahead_height: float = 2.35
-@export var look_ahead_forward: float = 2.4
-@export var base_fov: float = 78.0
-@export var boost_fov: float = 88.0
-@export var camera_smooth_speed: float = 16.0
+@export var follow_distance: float = 7.2
+@export var min_zoom_distance: float = 4.2
+@export var max_zoom_distance: float = 15.0
+@export var zoom_step: float = 0.95
+@export var zoom_smooth_speed: float = 14.0
+@export var shoulder_offset_x: float = 1.05
+@export var pivot_height: float = 1.45
+@export var look_ahead_height: float = 1.85
+@export var look_ahead_forward: float = 2.0
+@export var base_fov: float = 72.0
+@export var boost_fov: float = 80.0
+@export var camera_smooth_speed: float = 18.0
 @export var camera_collision_margin: float = 0.35
 
 var _camera_rig: Node3D
 var _camera: Camera3D
 var _hud: GameHUD
 var _yaw: float = 0.0
-var _pitch: float = -0.18
+var _pitch: float = -0.16
+var _target_zoom_distance: float = 7.2
+var _current_zoom_distance: float = 7.2
 var _smoothed_anchor: Vector3 = Vector3.ZERO
 var _has_anchor: bool = false
 var _current_level_idx: int = 0
 
 func _ready() -> void:
+	_target_zoom_distance = clampf(follow_distance, min_zoom_distance, max_zoom_distance)
+	_current_zoom_distance = _target_zoom_distance
+
 	_setup_lighting_if_needed()
 	_setup_camera()
 	_setup_hud()
@@ -137,7 +146,7 @@ func _resolve_camera_collision(pivot_pos: Vector3, desired_cam_pos: Vector3) -> 
 
 	var fractions := get_world_3d().direct_space_state.cast_motion(query)
 	if fractions.size() >= 2:
-		var safe_t := maxf(0.18, fractions[1] - 0.03)
+		var safe_t := maxf(0.22, fractions[1] - 0.03)
 		return pivot_pos + dir * (dist * safe_t)
 
 	return desired_cam_pos
@@ -154,15 +163,20 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_yaw -= event.relative.x * orbit_sensitivity
-		# Allow aiming high into the sky (+0.85 rad) while capping downward tilt (-0.75 rad)
 		_pitch = clampf(_pitch - event.relative.y * orbit_sensitivity, -0.75, 0.85)
-	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	elif event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_target_zoom_distance = clampf(_target_zoom_distance - zoom_step, min_zoom_distance, max_zoom_distance)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_target_zoom_distance = clampf(_target_zoom_distance + zoom_step, min_zoom_distance, max_zoom_distance)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_Q or (InputMap.has_action("center_camera") and event.is_action_pressed("center_camera")):
 			_yaw = 0.0
-			_pitch = -0.18
+			_pitch = -0.16
+			_target_zoom_distance = clampf(follow_distance, min_zoom_distance, max_zoom_distance)
 
 func _physics_process(delta: float) -> void:
 	if player_stack == null:
@@ -193,14 +207,16 @@ func _physics_process(delta: float) -> void:
 
 		player_stack.step_stack(delta, _yaw, _camera)
 
+	_current_zoom_distance = lerpf(_current_zoom_distance, _target_zoom_distance, 1.0 - exp(-zoom_smooth_speed * delta))
+	var zoom_ratio := clampf(_current_zoom_distance / maxf(0.1, follow_distance), 0.65, 1.85)
+
 	var target_anchor := player_stack.get_leader_position()
 	if not _has_anchor:
 		_smoothed_anchor = target_anchor
 		_has_anchor = true
 	else:
-		# Smooth horizontal faster than vertical so jumps feel airy and readable
 		var h_t := 1.0 - exp(-camera_smooth_speed * delta)
-		var v_t := 1.0 - exp(-(camera_smooth_speed * 0.65) * delta)
+		var v_t := 1.0 - exp(-(camera_smooth_speed * 0.72) * delta)
 		_smoothed_anchor.x = lerpf(_smoothed_anchor.x, target_anchor.x, h_t)
 		_smoothed_anchor.z = lerpf(_smoothed_anchor.z, target_anchor.z, h_t)
 		_smoothed_anchor.y = lerpf(_smoothed_anchor.y, target_anchor.y, v_t)
@@ -210,27 +226,26 @@ func _physics_process(delta: float) -> void:
 	var right_vec := yaw_basis.x
 	var forward_vec := -yaw_basis.z
 
-	# When looking up (_pitch > 0), keep camera pivot high enough that it doesn't scrape the ground
-	var up_aim_lift := maxf(0.0, _pitch) * 1.15
+	var active_shoulder := shoulder_offset_x * lerpf(0.82, 1.25, clampf((zoom_ratio - 0.65) / 1.2, 0.0, 1.0))
+	var up_aim_lift := maxf(0.0, _pitch) * 0.95
 	var rig_pos := (
 		_smoothed_anchor
 		+ Vector3.UP * (pivot_height + up_aim_lift)
-		+ right_vec * shoulder_offset_x
+		+ right_vec * active_shoulder
 		+ shake
 	)
 
 	var rot := Basis.from_euler(Vector3(_pitch, _yaw, 0.0))
-	var dyn_dist := follow_distance + (1.6 if player_stack.is_high_speed_state() else 0.0)
+	var dyn_dist := _current_zoom_distance + (0.95 if player_stack.is_high_speed_state() else 0.0)
 	var desired_offset := rot * Vector3(0.0, 0.0, dyn_dist)
 	var desired_cam_pos := rig_pos + desired_offset
 	var safe_cam_pos := _resolve_camera_collision(rig_pos, desired_cam_pos)
 
-	# Aim point sits ahead and above the stack so the player stays in the lower-left third
-	var pitch_aim_y := tan(_pitch) * 8.0
+	var pitch_aim_y := tan(_pitch) * 7.2
 	var look_target := (
 		_smoothed_anchor
 		+ Vector3.UP * (look_ahead_height + pitch_aim_y)
-		+ right_vec * (shoulder_offset_x * 0.85)
+		+ right_vec * (active_shoulder * 0.9)
 		+ forward_vec * look_ahead_forward
 		+ shake * 0.6
 	)
