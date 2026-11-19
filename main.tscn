@@ -212,9 +212,9 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(0.5075384, 0, 0.8616291, 0, 1, 0, -0.8616291, 0, 0.5075384, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.73042786, -2.6822087e-07, 0.6829898, 0.5527569, 0.58736855, 0.5911497, -0.40116692, 0.8093194, -0.42903027, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
-yaw_deg = 59.5
+yaw_deg = 122.135605
 pitch_deg = 40.0
 launch_speed = 44.5
 preview_gravity = 44.0

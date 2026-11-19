@@ -6,7 +6,7 @@ extends Node3D
 @export_range(-180.0, 180.0, 0.5) var yaw_deg: float = 155.0:
 	set(value):
 		yaw_deg = value
-		rotation.y = deg_to_rad(yaw_deg)
+		rotation_degrees.y = yaw_deg
 		_rebuild_preview_arc()
 
 @export_range(5.0, 85.0, 0.5) var pitch_deg: float = 38.0:
@@ -58,12 +58,19 @@ var _single_rides: Array[Dictionary] = []
 var _single_cooldowns: Dictionary = {}
 
 func _ready() -> void:
+	set_notify_transform(true)
 	for child: Node in get_children():
 		child.queue_free()
 
-	rotation.y = deg_to_rad(yaw_deg)
+	# Keep whatever rotation was set via the 3D gizmo in the scene
+	yaw_deg = rotation_degrees.y
 	_build_cannon_meshes()
 	_rebuild_preview_arc()
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_TRANSFORM_CHANGED:
+		if not is_equal_approx(yaw_deg, rotation_degrees.y):
+			yaw_deg = rotation_degrees.y
 
 func _build_cannon_meshes() -> void:
 	var iron_mat: StandardMaterial3D = StandardMaterial3D.new()
