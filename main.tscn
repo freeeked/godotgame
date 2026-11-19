@@ -1,0 +1,33 @@
+[gd_scene format=3 uid="uid://dg7dij5vxl23r"]
+
+[ext_resource type="Script" uid="uid://8wi1qs1f6e50" path="res://scripts/test_main.gd" id="1_0xm2m"]
+[ext_resource type="Script" uid="uid://dhtrm6jnaexc7" path="res://scripts/player_stack.gd" id="1_ig7tw"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_nay18"]
+size = Vector3(9.129486, 1, 1.6502686)
+
+[sub_resource type="ConcavePolygonShape3D" id="ConcavePolygonShape3D_0xm2m"]
+data = PackedVector3Array(-4.5646996, 0.5, 0.8251, 4.5646996, 0.5, 0.8251, -4.5646996, -0.5, 0.8251, 4.5646996, 0.5, 0.8251, 4.5646996, -0.5, 0.8251, -4.5646996, -0.5, 0.8251, 4.5646996, 0.5, -0.8251, -4.5646996, 0.5, -0.8251, 4.5646996, -0.5, -0.8251, -4.5646996, 0.5, -0.8251, -4.5646996, -0.5, -0.8251, 4.5646996, -0.5, -0.8251, 4.5646996, 0.5, 0.8251, 4.5646996, 0.5, -0.8251, 4.5646996, -0.5, 0.8251, 4.5646996, 0.5, -0.8251, 4.5646996, -0.5, -0.8251, 4.5646996, -0.5, 0.8251, -4.5646996, 0.5, -0.8251, -4.5646996, 0.5, 0.8251, -4.5646996, -0.5, -0.8251, -4.5646996, 0.5, 0.8251, -4.5646996, -0.5, 0.8251, -4.5646996, -0.5, -0.8251, 4.5646996, 0.5, 0.8251, -4.5646996, 0.5, 0.8251, 4.5646996, 0.5, -0.8251, -4.5646996, 0.5, 0.8251, -4.5646996, 0.5, -0.8251, 4.5646996, 0.5, -0.8251, -4.5646996, -0.5, 0.8251, 4.5646996, -0.5, 0.8251, -4.5646996, -0.5, -0.8251, 4.5646996, -0.5, 0.8251, 4.5646996, -0.5, -0.8251, -4.5646996, -0.5, -0.8251)
+
+[node name="Main" type="Node3D" unique_id=276455839]
+script = ExtResource("1_0xm2m")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1135668851]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.2930784, 5.455948, 0)
+
+[node name="Camera3D" type="Camera3D" parent="DirectionalLight3D" unique_id=1936611379]
+transform = Transform3D(1, 0, 0, 0, 0.6187748, 0.7855685, 0, -0.7855685, 0.6187748, 0, 5, 11)
+
+[node name="PlayerStack" type="Node3D" parent="." unique_id=390215416]
+script = ExtResource("1_ig7tw")
+
+[node name="TestFloor" type="StaticBody3D" parent="." unique_id=897125917]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="TestFloor" unique_id=106948784]
+transform = Transform3D(19.509756, 0, 0, 0, 1.2098289, 0, 0, 0, 60.405067, -19.59935, -1, 4.80576)
+mesh = SubResource("BoxMesh_nay18")
+
+[node name="StaticBody3D" type="StaticBody3D" parent="TestFloor/MeshInstance3D" unique_id=1273570719]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="TestFloor/MeshInstance3D/StaticBody3D" unique_id=62997427]
+shape = SubResource("ConcavePolygonShape3D_0xm2m")
