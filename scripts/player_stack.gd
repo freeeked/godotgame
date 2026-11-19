@@ -122,6 +122,9 @@ var _elapsed: float = 0.0
 var camera_shake_offset: Vector3 = Vector3.ZERO
 var _camera_shake_vel: Vector3 = Vector3.ZERO
 
+var _stack_hull_shape: CapsuleShape3D = null
+var _stack_hull_node: CollisionShape3D = null
+
 func _ready() -> void:
 	_build_blobs()
 	respawn(Vector3.ZERO)
@@ -229,6 +232,69 @@ func _build_blobs() -> void:
 	_active_nodes = _all_nodes.duplicate()
 	_sync_collider_states()
 
+func _get_standing_stack_height() -> float:
+	if _active_nodes.is_empty():
+		return 1.0
+	var bottom := _active_nodes[0]
+	var total_h := bottom.radius * 2.0
+	for i in range(1, _active_nodes.size()):
+		total_h += (_active_nodes[i - 1].radius + _active_nodes[i].radius) * 0.90
+	return total_h
+
+func _can_stand_up() -> bool:
+	if _active_nodes.size() <= 1:
+		return true
+	var bottom := _active_nodes[0]
+	var standing_h := _get_standing_stack_height()
+	var col_r := bottom.radius * 0.82
+	if standing_h <= col_r * 2.05:
+		return true
+
+	var feet_y := bottom.body.global_position.y - bottom.radius * 0.85
+	var check_top_y := feet_y + standing_h - col_r
+	var start_pos := Vector3(bottom.body.global_position.x, feet_y + col_r + 0.05, bottom.body.global_position.z)
+	var motion_y := maxf(0.0, check_top_y - start_pos.y)
+	if motion_y <= 0.01:
+		return true
+
+	var sphere := SphereShape3D.new()
+	sphere.radius = col_r * 0.92
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = sphere
+	query.transform = Transform3D(Basis.IDENTITY, start_pos)
+	query.motion = Vector3(0.0, motion_y, 0.0)
+	query.exclude = _get_all_blob_rids()
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+
+	var fractions := get_world_3d().direct_space_state.cast_motion(query)
+	return fractions.size() < 2 or fractions[1] >= 0.98
+
+func _update_stack_hull_collider() -> void:
+	if _active_nodes.is_empty():
+		return
+	var bottom := _active_nodes[0]
+	if _stack_hull_node == null:
+		_stack_hull_shape = CapsuleShape3D.new()
+		_stack_hull_node = CollisionShape3D.new()
+		_stack_hull_node.name = "StackHeightHull"
+		_stack_hull_node.shape = _stack_hull_shape
+
+	if _stack_hull_node.get_parent() != bottom.body:
+		if _stack_hull_node.get_parent() != null:
+			_stack_hull_node.get_parent().remove_child(_stack_hull_node)
+		bottom.body.add_child(_stack_hull_node)
+
+	var base_r := bottom.radius * 0.85
+	var standing_h := _get_standing_stack_height()
+	var current_h := lerpf(standing_h, base_r * 2.0, _roll_blend)
+
+	_stack_hull_shape.radius = base_r
+	_stack_hull_shape.height = maxf(base_r * 2.0, current_h)
+	# Keep the bottom of the capsule aligned with the driver's feet so ramps/stairs feel identical
+	_stack_hull_node.position = Vector3(0.0, (_stack_hull_shape.height * 0.5) - base_r, 0.0)
+	_stack_hull_node.disabled = (_stack_swoop_target != null)
+
 func _sync_collider_states() -> void:
 	for idx in range(_active_nodes.size()):
 		var b := _active_nodes[idx]
@@ -239,6 +305,7 @@ func _sync_collider_states() -> void:
 		var dead := _dead_nodes.has(b)
 		b.body.visible = not dead
 		b.col_shape.disabled = dead or b.is_recalling
+	_update_stack_hull_collider()
 
 func is_blob_dead(blob: StackBlob) -> bool:
 	return _dead_nodes.has(blob)
@@ -1591,8 +1658,10 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		if input_dir.length_squared() > 0.0001:
 			input_dir = input_dir.normalized()
 
-	var wants_sprint_roll := _read_sprint_held()
+	var sprint_held := _read_sprint_held()
 	var has_move_input := input_dir.length_squared() > 0.0
+	var forced_crouch := (not sprint_held) and _roll_blend > 0.35 and not _can_stand_up()
+	var wants_sprint_roll := sprint_held or forced_crouch
 
 	if wants_sprint_roll and not _is_sprint_rolling:
 		_is_sprint_rolling = true
@@ -1656,6 +1725,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		target_blend = 1.0 if _is_sprint_rolling else 0.0
 
 	_roll_blend = lerpf(_roll_blend, target_blend, 1.0 - exp(-blend_rate * delta))
+	_update_stack_hull_collider()
 
 	if _is_grounded and _leader_vel.y <= 0.0:
 		_launch_momentum_timer = 0.0
@@ -1784,7 +1854,6 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_update_sprint_roll_followers(delta, speed_stretch, roll_roundness)
 	else:
 		_update_vertical_stack_followers(delta)
-
 func _update_vertical_stack_followers(delta: float) -> void:
 	var line_heading := _active_nodes[0].pivot.rotation.y
 	for i in range(1, _active_nodes.size()):

@@ -2,36 +2,71 @@ extends Node3D
 
 @onready var player_stack: PlayerStack = get_node_or_null("PlayerStack") as PlayerStack
 
-@export_group("Camera Framing & Zoom")
+enum CameraFeelMode {
+	SNAPPY = 0,
+	CINEMATIC_FLUID = 1,
+}
+
+@export_group("Camera Mode & Controls")
+@export var camera_mode: CameraFeelMode = CameraFeelMode.SNAPPY
 @export var orbit_sensitivity: float = 0.0036
 @export var key_orbit_speed: float = 2.2
-@export var follow_distance: float = 7.2
 @export var min_zoom_distance: float = 4.2
 @export var max_zoom_distance: float = 15.0
 @export var zoom_step: float = 0.95
-@export var zoom_smooth_speed: float = 14.0
-@export var shoulder_offset_x: float = 1.05
-@export var pivot_height: float = 1.45
-@export var look_ahead_height: float = 1.85
-@export var look_ahead_forward: float = 2.0
-@export var base_fov: float = 72.0
-@export var boost_fov: float = 80.0
-@export var camera_smooth_speed: float = 18.0
-@export var camera_collision_margin: float = 0.35
+@export var camera_collision_margin: float = 0.45
+
+@export_group("Snappy Camera Tuning")
+@export var snappy_follow_distance: float = 7.2
+@export var snappy_shoulder_offset_x: float = 1.05
+@export var snappy_pivot_height: float = 1.45
+@export var snappy_look_ahead_height: float = 1.85
+@export var snappy_look_ahead_forward: float = 2.0
+@export var snappy_horiz_smooth: float = 22.0
+@export var snappy_vert_smooth: float = 15.0
+@export var snappy_orbit_smooth: float = 40.0
+@export var snappy_zoom_smooth: float = 18.0
+@export var snappy_base_fov: float = 72.0
+@export var snappy_boost_fov: float = 80.0
+
+@export_group("Cinematic Fluid Camera Tuning")
+@export var fluid_follow_distance: float = 8.4
+@export var fluid_shoulder_offset_x: float = 1.25
+@export var fluid_pivot_height: float = 1.65
+@export var fluid_look_ahead_height: float = 2.05
+@export var fluid_look_ahead_forward: float = 3.2
+@export var fluid_velocity_lead: float = 0.16
+@export var fluid_horiz_smooth: float = 7.5
+@export var fluid_vert_smooth: float = 5.2
+@export var fluid_orbit_smooth: float = 11.0
+@export var fluid_zoom_smooth: float = 7.0
+@export var fluid_bank_roll_deg: float = 2.6
+@export var fluid_base_fov: float = 75.0
+@export var fluid_boost_fov: float = 87.0
 
 var _camera_rig: Node3D
 var _camera: Camera3D
 var _hud: GameHUD
-var _yaw: float = 0.0
-var _pitch: float = -0.16
+
+var _target_yaw: float = 0.0
+var _target_pitch: float = -0.16
+var _current_yaw: float = 0.0
+var _current_pitch: float = -0.16
+var _prev_yaw: float = 0.0
+
 var _target_zoom_distance: float = 7.2
 var _current_zoom_distance: float = 7.2
 var _smoothed_anchor: Vector3 = Vector3.ZERO
+var _prev_anchor: Vector3 = Vector3.ZERO
+var _anchor_vel: Vector3 = Vector3.ZERO
+var _smoothed_vel_lead: Vector3 = Vector3.ZERO
+var _smoothed_bank_roll: float = 0.0
 var _has_anchor: bool = false
 var _current_level_idx: int = 0
 
 func _ready() -> void:
-	_target_zoom_distance = clampf(follow_distance, min_zoom_distance, max_zoom_distance)
+	var default_dist := _get_mode_follow_distance()
+	_target_zoom_distance = clampf(default_dist, min_zoom_distance, max_zoom_distance)
 	_current_zoom_distance = _target_zoom_distance
 
 	_setup_lighting_if_needed()
@@ -60,6 +95,13 @@ func _ready() -> void:
 			_refresh_stack_hud()
 		)
 		_refresh_stack_hud()
+
+func toggle_camera_mode() -> void:
+	camera_mode = CameraFeelMode.CINEMATIC_FLUID if camera_mode == CameraFeelMode.SNAPPY else CameraFeelMode.SNAPPY
+	_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
+
+func _get_mode_follow_distance() -> float:
+	return fluid_follow_distance if camera_mode == CameraFeelMode.CINEMATIC_FLUID else snappy_follow_distance
 
 func _refresh_stack_hud() -> void:
 	if _hud != null and player_stack != null:
@@ -117,28 +159,22 @@ func _setup_camera() -> void:
 	elif _camera.get_parent() != _camera_rig:
 		_camera.reparent(_camera_rig)
 
-	_camera.fov = base_fov
+	_camera.fov = snappy_base_fov if camera_mode == CameraFeelMode.SNAPPY else fluid_base_fov
 	_camera.current = true
 
-func _resolve_camera_collision(pivot_pos: Vector3, desired_cam_pos: Vector3) -> Vector3:
-	var to_cam := desired_cam_pos - pivot_pos
-	var dist := to_cam.length()
+func _sweep_camera_segment(from_pos: Vector3, to_pos: Vector3, margin: float, exclude_rids: Array[RID]) -> Vector3:
+	var segment := to_pos - from_pos
+	var dist := segment.length()
 	if dist <= 0.001:
-		return desired_cam_pos
+		return from_pos
 
-	var dir := to_cam / dist
-	var exclude_rids: Array[RID] = []
-	if player_stack != null:
-		for child in player_stack.get_children():
-			if child is CollisionObject3D:
-				exclude_rids.append((child as CollisionObject3D).get_rid())
-
+	var dir := segment / dist
 	var sphere := SphereShape3D.new()
-	sphere.radius = camera_collision_margin
+	sphere.radius = margin
 
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = sphere
-	query.transform = Transform3D(Basis.IDENTITY, pivot_pos)
+	query.transform = Transform3D(Basis.IDENTITY, from_pos)
 	query.motion = dir * dist
 	query.exclude = exclude_rids
 	query.collide_with_areas = false
@@ -146,10 +182,23 @@ func _resolve_camera_collision(pivot_pos: Vector3, desired_cam_pos: Vector3) -> 
 
 	var fractions := get_world_3d().direct_space_state.cast_motion(query)
 	if fractions.size() >= 2:
-		var safe_t := maxf(0.22, fractions[1] - 0.03)
-		return pivot_pos + dir * (dist * safe_t)
+		# Never clamp above 0.0 so a wall right against the player pulls the shoulder/camera cleanly inside
+		var safe_t := clampf(fractions[1] - 0.02, 0.0, 1.0)
+		return from_pos + dir * (dist * safe_t)
 
-	return desired_cam_pos
+	return to_pos
+
+func _resolve_wall_safe_camera(center_pivot: Vector3, desired_shoulder_pivot: Vector3, desired_cam_pos: Vector3) -> Vector3:
+	var exclude_rids: Array[RID] = []
+	if player_stack != null:
+		for child in player_stack.get_children():
+			if child is CollisionObject3D:
+				exclude_rids.append((child as CollisionObject3D).get_rid())
+
+	# Stage 1: Sweep from player center out to shoulder offset so shoulder never clips through a wall
+	var safe_shoulder := _sweep_camera_segment(center_pivot, desired_shoulder_pivot, camera_collision_margin, exclude_rids)
+	# Stage 2: Sweep from safe shoulder position back to desired camera position
+	return _sweep_camera_segment(safe_shoulder, desired_cam_pos, camera_collision_margin, exclude_rids)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -162,8 +211,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_yaw -= event.relative.x * orbit_sensitivity
-		_pitch = clampf(_pitch - event.relative.y * orbit_sensitivity, -0.75, 0.85)
+		_target_yaw -= event.relative.x * orbit_sensitivity
+		_target_pitch = clampf(_target_pitch - event.relative.y * orbit_sensitivity, -0.75, 0.85)
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -173,10 +222,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_target_zoom_distance = clampf(_target_zoom_distance + zoom_step, min_zoom_distance, max_zoom_distance)
 	elif event is InputEventKey and event.pressed and not event.echo:
-		if event.physical_keycode == KEY_Q or (InputMap.has_action("center_camera") and event.is_action_pressed("center_camera")):
-			_yaw = 0.0
-			_pitch = -0.16
-			_target_zoom_distance = clampf(follow_distance, min_zoom_distance, max_zoom_distance)
+		if event.physical_keycode == KEY_V or event.physical_keycode == KEY_TAB:
+			toggle_camera_mode()
+		elif event.physical_keycode == KEY_Q or (InputMap.has_action("center_camera") and event.is_action_pressed("center_camera")):
+			_target_yaw = 0.0
+			_target_pitch = -0.16
+			_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
 
 func _physics_process(delta: float) -> void:
 	if player_stack == null:
@@ -202,57 +253,98 @@ func _physics_process(delta: float) -> void:
 			if Input.is_physical_key_pressed(KEY_K):
 				orbit_y += 1.0
 
-		_yaw += orbit_x * key_orbit_speed * delta
-		_pitch = clampf(_pitch + orbit_y * key_orbit_speed * delta, -0.75, 0.85)
+		_target_yaw += orbit_x * key_orbit_speed * delta
+		_target_pitch = clampf(_target_pitch + orbit_y * key_orbit_speed * delta, -0.75, 0.85)
 
-		player_stack.step_stack(delta, _yaw, _camera)
+		player_stack.step_stack(delta, _target_yaw, _camera)
 
-	_current_zoom_distance = lerpf(_current_zoom_distance, _target_zoom_distance, 1.0 - exp(-zoom_smooth_speed * delta))
-	var zoom_ratio := clampf(_current_zoom_distance / maxf(0.1, follow_distance), 0.65, 1.85)
+	var is_fluid := camera_mode == CameraFeelMode.CINEMATIC_FLUID
+	var mode_dist := fluid_follow_distance if is_fluid else snappy_follow_distance
+	var mode_shoulder := fluid_shoulder_offset_x if is_fluid else snappy_shoulder_offset_x
+	var mode_pivot_h := fluid_pivot_height if is_fluid else snappy_pivot_height
+	var mode_look_h := fluid_look_ahead_height if is_fluid else snappy_look_ahead_height
+	var mode_look_fwd := fluid_look_ahead_forward if is_fluid else snappy_look_ahead_forward
+	var h_smooth := fluid_horiz_smooth if is_fluid else snappy_horiz_smooth
+	var v_smooth := fluid_vert_smooth if is_fluid else snappy_vert_smooth
+	var orbit_smooth := fluid_orbit_smooth if is_fluid else snappy_orbit_smooth
+	var zoom_smooth := fluid_zoom_smooth if is_fluid else snappy_zoom_smooth
+	var base_fov := fluid_base_fov if is_fluid else snappy_base_fov
+	var boost_fov := fluid_boost_fov if is_fluid else snappy_boost_fov
 
-	var target_anchor := player_stack.get_leader_position()
+	_current_yaw = lerp_angle(_current_yaw, _target_yaw, 1.0 - exp(-orbit_smooth * delta))
+	_current_pitch = lerpf(_current_pitch, _target_pitch, 1.0 - exp(-orbit_smooth * delta))
+	_current_zoom_distance = lerpf(_current_zoom_distance, _target_zoom_distance, 1.0 - exp(-zoom_smooth * delta))
+	var zoom_ratio := clampf(_current_zoom_distance / maxf(0.1, mode_dist), 0.65, 1.85)
+
+	var raw_anchor := player_stack.get_leader_position()
 	if not _has_anchor:
-		_smoothed_anchor = target_anchor
+		_smoothed_anchor = raw_anchor
+		_prev_anchor = raw_anchor
+		_anchor_vel = Vector3.ZERO
 		_has_anchor = true
 	else:
-		var h_t := 1.0 - exp(-camera_smooth_speed * delta)
-		var v_t := 1.0 - exp(-(camera_smooth_speed * 0.72) * delta)
-		_smoothed_anchor.x = lerpf(_smoothed_anchor.x, target_anchor.x, h_t)
-		_smoothed_anchor.z = lerpf(_smoothed_anchor.z, target_anchor.z, h_t)
-		_smoothed_anchor.y = lerpf(_smoothed_anchor.y, target_anchor.y, v_t)
+		var inst_vel := (raw_anchor - _prev_anchor) / maxf(0.0001, delta)
+		_prev_anchor = raw_anchor
+		_anchor_vel = _anchor_vel.lerp(inst_vel, 1.0 - exp(-10.0 * delta))
+
+		var h_t := 1.0 - exp(-h_smooth * delta)
+		var v_t := 1.0 - exp(-v_smooth * delta)
+		_smoothed_anchor.x = lerpf(_smoothed_anchor.x, raw_anchor.x, h_t)
+		_smoothed_anchor.z = lerpf(_smoothed_anchor.z, raw_anchor.z, h_t)
+		_smoothed_anchor.y = lerpf(_smoothed_anchor.y, raw_anchor.y, v_t)
 
 	var shake := player_stack.camera_shake_offset
-	var yaw_basis := Basis(Vector3.UP, _yaw)
+	var yaw_basis := Basis(Vector3.UP, _current_yaw)
 	var right_vec := yaw_basis.x
 	var forward_vec := -yaw_basis.z
 
-	var active_shoulder := shoulder_offset_x * lerpf(0.82, 1.25, clampf((zoom_ratio - 0.65) / 1.2, 0.0, 1.0))
-	var up_aim_lift := maxf(0.0, _pitch) * 0.95
-	var rig_pos := (
+	# Cinematic velocity lead & subtle banking roll
+	var target_vel_lead := Vector3.ZERO
+	var target_bank := 0.0
+	if is_fluid:
+		var horiz_vel := Vector3(_anchor_vel.x, 0.0, _anchor_vel.z)
+		target_vel_lead = horiz_vel * fluid_velocity_lead
+		var strafe_speed := horiz_vel.dot(right_vec)
+		var yaw_rate := clampf(wrapf(_current_yaw - _prev_yaw, -PI, PI) / maxf(0.0001, delta), -4.0, 4.0)
+		target_bank = deg_to_rad(clampf(-strafe_speed * 0.16 - yaw_rate * 0.45, -fluid_bank_roll_deg, fluid_bank_roll_deg))
+	_prev_yaw = _current_yaw
+
+	_smoothed_vel_lead = _smoothed_vel_lead.lerp(target_vel_lead, 1.0 - exp(-6.5 * delta))
+	_smoothed_bank_roll = lerpf(_smoothed_bank_roll, target_bank, 1.0 - exp(-8.0 * delta))
+
+	var active_shoulder := mode_shoulder * lerpf(0.82, 1.25, clampf((zoom_ratio - 0.65) / 1.2, 0.0, 1.0))
+	var up_aim_lift := maxf(0.0, _current_pitch) * 0.95
+
+	# Center pivot stays strictly inside the stack's XZ column so wall sweeps never start outside the map
+	var center_pivot := raw_anchor + Vector3.UP * (mode_pivot_h + up_aim_lift)
+	var desired_shoulder_pivot := (
 		_smoothed_anchor
-		+ Vector3.UP * (pivot_height + up_aim_lift)
+		+ _smoothed_vel_lead * 0.45
+		+ Vector3.UP * (mode_pivot_h + up_aim_lift)
 		+ right_vec * active_shoulder
 		+ shake
 	)
 
-	var rot := Basis.from_euler(Vector3(_pitch, _yaw, 0.0))
-	var dyn_dist := _current_zoom_distance + (0.95 if player_stack.is_high_speed_state() else 0.0)
-	var desired_offset := rot * Vector3(0.0, 0.0, dyn_dist)
-	var desired_cam_pos := rig_pos + desired_offset
-	var safe_cam_pos := _resolve_camera_collision(rig_pos, desired_cam_pos)
+	var rot := Basis.from_euler(Vector3(_current_pitch, _current_yaw, 0.0))
+	var dyn_dist := _current_zoom_distance + ((1.45 if is_fluid else 0.95) if player_stack.is_high_speed_state() else 0.0)
+	var desired_cam_pos := desired_shoulder_pivot + rot * Vector3(0.0, 0.0, dyn_dist)
+	var safe_cam_pos := _resolve_wall_safe_camera(center_pivot, desired_shoulder_pivot, desired_cam_pos)
 
-	var pitch_aim_y := tan(_pitch) * 7.2
+	var pitch_aim_y := tan(_current_pitch) * 7.2
 	var look_target := (
 		_smoothed_anchor
-		+ Vector3.UP * (look_ahead_height + pitch_aim_y)
+		+ _smoothed_vel_lead
+		+ Vector3.UP * (mode_look_h + pitch_aim_y)
 		+ right_vec * (active_shoulder * 0.9)
-		+ forward_vec * look_ahead_forward
+		+ forward_vec * mode_look_fwd
 		+ shake * 0.6
 	)
 
-	_camera_rig.global_position = rig_pos
+	_camera_rig.global_position = desired_shoulder_pivot
 	_camera.global_position = safe_cam_pos
 	_camera.look_at(look_target, Vector3.UP)
+	if absf(_smoothed_bank_roll) > 0.0001:
+		_camera.rotate_object_local(Vector3.FORWARD, _smoothed_bank_roll)
 
 	var target_fov := boost_fov if player_stack.is_high_speed_state() else base_fov
-	_camera.fov = lerpf(_camera.fov, target_fov, 1.0 - exp(-10.0 * delta))
+	_camera.fov = lerpf(_camera.fov, target_fov, 1.0 - exp(-(6.5 if is_fluid else 11.0) * delta))
