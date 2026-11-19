@@ -1150,11 +1150,6 @@ func _find_floor_y(at_pos: Vector3, fallback_feet_y: float, exclude_rids: Array[
 
 func _get_camera_horizontal_forward() -> Vector3:
 	if _last_camera != null:
-		var aim_dir := _get_camera_aim_direction()
-		var flat_aim := Vector3(aim_dir.x, 0.0, aim_dir.z)
-		if flat_aim.length_squared() > 0.0025:
-			return flat_aim.normalized()
-
 		var cam_fwd := -_last_camera.global_transform.basis.z
 		var flat_cam := Vector3(cam_fwd.x, 0.0, cam_fwd.z)
 		if flat_cam.length_squared() > 0.0001:
@@ -1380,14 +1375,34 @@ func _reabsorb_blob(ejected_index: int) -> void:
 
 	var jiggle_mag := 14.5 if was_recalling else 8.5
 
+	# Check if the stack will be too tall for the current ceiling once this blob rejoins
+	_active_nodes.append(blob)
+	var must_crouch := not _can_stand_up()
+	if must_crouch and not _is_sprint_rolling:
+		_is_sprint_rolling = true
+		_roll_blend = 1.0
+		_roll_entry_timer = 0.0
+		_roll_exit_timer = 0.0
+
 	if _is_sprint_rolling:
 		var back_x := -sin(_facing_angle)
 		var back_z := -cos(_facing_angle)
 		var spacing := (current_top.radius + blob.radius) * roll_spacing_factor
+		var target_x := current_top.body.global_position.x + back_x * spacing
+		var target_z := current_top.body.global_position.z + back_z * spacing
+		var top_feet_y := current_top.body.global_position.y - current_top.radius * 0.92
+		var target_feet_y := _sample_follower_feet_y(
+			target_x,
+			target_z,
+			top_feet_y,
+			top_feet_y,
+			_active_nodes.size() - 1,
+			_get_all_blob_rids()
+		)
 		blob.body.global_position = Vector3(
-			current_top.body.global_position.x + back_x * spacing,
-			current_top.body.global_position.y - current_top.radius * 0.92 + blob.radius * 0.92,
-			current_top.body.global_position.z + back_z * spacing
+			target_x,
+			target_feet_y + blob.radius * 0.92,
+			target_z
 		)
 		blob.velocity = Vector3(
 			impact_horiz.x * jiggle_mag * 0.65,
@@ -1431,7 +1446,6 @@ func _reabsorb_blob(ejected_index: int) -> void:
 		_leader_vel.x += impact_horiz.x * 1.4
 		_leader_vel.z += impact_horiz.y * 1.4
 
-	_active_nodes.append(blob)
 	_sync_collider_states()
 	blob_reabsorbed.emit(blob.id, blob.blob_name, was_recalling)
 
@@ -1660,7 +1674,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 
 	var sprint_held := _read_sprint_held()
 	var has_move_input := input_dir.length_squared() > 0.0
-	var forced_crouch := (not sprint_held) and _roll_blend > 0.35 and not _can_stand_up()
+	var forced_crouch := (not sprint_held) and _active_nodes.size() > 1 and not _can_stand_up()
 	var wants_sprint_roll := sprint_held or forced_crouch
 
 	if wants_sprint_roll and not _is_sprint_rolling:
