@@ -1765,6 +1765,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_roll_spin_angle = 0.0
 
 	bottom.pivot.rotation.y = _lerp_angle(bottom.pivot.rotation.y, _facing_angle, 22.0 * delta)
+	bottom.pivot.rotation.x = _lerp_angle(bottom.pivot.rotation.x, 0.0, 20.0 * delta)
 	bottom.visual_root.rotation.x = _roll_spin_angle * _roll_blend
 
 	_update_squash_springs(delta)
@@ -1820,12 +1821,46 @@ func _update_vertical_stack_followers(delta: float) -> void:
 		)
 
 		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, line_heading, 20.0 * delta)
+		curr.pivot.rotation.x = _lerp_angle(curr.pivot.rotation.x, 0.0, 20.0 * delta)
 		curr.visual_root.rotation.x = curr.velocity.z * 0.035
 		curr.visual_root.rotation.z = -curr.velocity.x * 0.035
+
+func _sample_follower_feet_y(
+	pos_x: float,
+	pos_z: float,
+	curr_feet_y: float,
+	ahead_feet_y: float,
+	chain_index: int,
+	exclude_rids: Array[RID]
+) -> float:
+	if not _is_grounded:
+		return ahead_feet_y
+
+	var space_state := get_world_3d().direct_space_state
+	var probe_top := maxf(curr_feet_y, ahead_feet_y) + 1.45
+	var max_drop := 1.65
+	var probe_bottom := ahead_feet_y - max_drop
+
+	var query := PhysicsRayQueryParameters3D.create(
+		Vector3(pos_x, probe_top, pos_z),
+		Vector3(pos_x, probe_bottom, pos_z)
+	)
+	query.exclude = exclude_rids
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+
+	var hit := space_state.intersect_ray(query)
+	if not hit.is_empty():
+		var hit_y := (hit["position"] as Vector3).y
+		return clampf(hit_y, ahead_feet_y - max_drop, ahead_feet_y + 1.25)
+
+	# Over a sheer ledge/drop: drape slightly downward instead of sticking straight out
+	return ahead_feet_y - 0.28 * float(chain_index)
 
 func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roundness: float) -> void:
 	var back_x := -sin(_facing_angle)
 	var back_z := -cos(_facing_angle)
+	var exclude_rids := _get_all_blob_rids()
 
 	for i in range(1, _active_nodes.size()):
 		var ahead := _active_nodes[i - 1]
@@ -1857,18 +1892,34 @@ func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roun
 			curr.body.global_position.z = ahead.body.global_position.z + offset_z * pull
 
 		var ahead_feet_y := ahead.body.global_position.y - ahead.radius * 0.92
-		var target_y := ahead_feet_y + curr.radius * 0.92
+		var curr_feet_y := curr.body.global_position.y - curr.radius * 0.92
+		var surface_feet_y := _sample_follower_feet_y(
+			curr.body.global_position.x,
+			curr.body.global_position.z,
+			curr_feet_y,
+			ahead_feet_y,
+			i,
+			exclude_rids
+		)
+		var target_y := surface_feet_y + curr.radius * 0.92
+		var y_follow_rate := 36.0 if _is_grounded else 26.0
 		curr.body.global_position.y = lerpf(
 			curr.body.global_position.y,
 			target_y,
-			1.0 - exp(-32.0 * delta)
+			1.0 - exp(-y_follow_rate * delta)
 		)
 
 		var look_x := ahead.body.global_position.x - curr.body.global_position.x
 		var look_z := ahead.body.global_position.z - curr.body.global_position.z
-		var look_heading := atan2(look_x, look_z) if Vector2(look_x, look_z).length() > 0.05 else _facing_angle
+		var horiz_sep := Vector2(look_x, look_z).length()
+		var look_heading := atan2(look_x, look_z) if horiz_sep > 0.05 else _facing_angle
+
+		# Tilt follower pivot along the ramp/stair contour while preserving spin on visual_root
+		var updated_feet_y := curr.body.global_position.y - curr.radius * 0.92
+		var slope_pitch := clampf(-atan2(ahead_feet_y - updated_feet_y, maxf(0.25, horiz_sep)), -0.65, 0.65)
 
 		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, look_heading, 22.0 * delta)
+		curr.pivot.rotation.x = _lerp_angle(curr.pivot.rotation.x, slope_pitch * _roll_blend, 18.0 * delta)
 		curr.visual_root.rotation.x = _roll_spin_angle * (_active_nodes[0].radius / maxf(0.4, curr.radius)) * _roll_blend
 		curr.visual_root.rotation.z = 0.0
 
