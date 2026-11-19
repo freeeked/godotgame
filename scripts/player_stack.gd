@@ -1803,3 +1803,18 @@ func _update_squash_springs(delta: float) -> void:
 func _lerp_angle(a: float, b: float, t: float) -> float:
 	var diff := fposmod(b - a + PI, TAU) - PI
 	return a + diff * minf(1.0, t)
+	
+func get_stack_statuses() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for b in _all_nodes:
+		var stacked_idx := _active_nodes.find(b)
+		var is_dead := _dead_nodes.has(b)
+		out.append({
+			"id": b.id,
+			"name": b.blob_name,
+			"color": b.color,
+			"is_stacked": stacked_idx != -1 and not is_dead,
+			"stack_pos": stacked_idx,
+			"is_dead": is_dead,
+		})
+	return out
