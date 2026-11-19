@@ -1026,6 +1026,19 @@ func eject_top_character() -> StackBlob:
 	blob_ejected.emit(top_node.id, top_node.blob_name, false)
 	return top_node
 
+func _find_floor_y(at_pos: Vector3, fallback_feet_y: float, exclude_rids: Array[RID]) -> float:
+	var space_state := get_world_3d().direct_space_state
+	var ray_from := Vector3(at_pos.x, at_pos.y + 1.2, at_pos.z)
+	var ray_to := Vector3(at_pos.x, fallback_feet_y - 0.6, at_pos.z)
+	var query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+	query.exclude = exclude_rids
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	var hit := space_state.intersect_ray(query)
+	if not hit.is_empty():
+		return (hit["position"] as Vector3).y
+	return fallback_feet_y
+
 func roll_bottom_character() -> StackBlob:
 	if _active_nodes.size() <= 1:
 		return null
@@ -1033,44 +1046,71 @@ func roll_bottom_character() -> StackBlob:
 	var is_sprint_launch := _is_sprint_rolling
 	var forward_x := sin(_facing_angle)
 	var forward_z := cos(_facing_angle)
+	var back_x := -forward_x
+	var back_z := -forward_z
+	var exclude_rids := _get_all_blob_rids()
 
 	var prev_driver := _active_nodes[0]
+	var prev_col_r := prev_driver.radius * 0.85
 	var anchor_x := prev_driver.body.global_position.x
 	var anchor_z := prev_driver.body.global_position.z
-	var anchor_feet_y := prev_driver.body.global_position.y - prev_driver.radius * 0.92
+	var raw_feet_y := prev_driver.body.global_position.y - prev_col_r
+	var floor_y := _find_floor_y(prev_driver.body.global_position, raw_feet_y, exclude_rids) if _is_grounded else raw_feet_y
 
 	var bottom_node: StackBlob = _active_nodes.pop_front()
 	var new_driver := _active_nodes[0]
 	var cur_horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
 
-	new_driver.body.global_position = Vector3(
-		anchor_x,
-		anchor_feet_y + new_driver.radius * 0.92,
-		anchor_z
-	)
+	var new_col_r := new_driver.radius * 0.85
+	var ball_col_r := bottom_node.radius * 0.85
 
-	var ball_center_y := anchor_feet_y + bottom_node.radius * 0.92
-	var desired_clearance := new_driver.radius + bottom_node.radius + 0.14
-	var exclude_rids := _get_all_blob_rids()
-	var safe_clearance := 0.0
-	var step_size := 0.08
+	# If sprint-rolling in a snake line, keep new_driver at its current trail position (don't teleport it forward!)
+	# so the remaining snake never snaps/rubber-bands into the launched ball.
+	var driver_x := anchor_x
+	var driver_z := anchor_z
+	if is_sprint_launch:
+		driver_x = new_driver.body.global_position.x
+		driver_z = new_driver.body.global_position.z
+		var driver_raw_feet := new_driver.body.global_position.y - new_col_r
+		var driver_floor := _find_floor_y(new_driver.body.global_position, driver_raw_feet, exclude_rids) if _is_grounded else driver_raw_feet
+		new_driver.body.global_position = Vector3(driver_x, driver_floor + new_col_r + 0.02, driver_z)
+	else:
+		new_driver.body.global_position = Vector3(anchor_x, floor_y + new_col_r + 0.02, anchor_z)
+
+	# Spawn the bowled ball from the old leader's front position cleanly above the floor
+	var ball_center_y := floor_y + ball_col_r + 0.03
+	var desired_lead := 0.25 if is_sprint_launch else (new_driver.radius + bottom_node.radius + 0.18)
+	var safe_lead := 0.0
+	var step_size := 0.06
 	var d := step_size
-	while d <= desired_clearance + 0.001:
+	while d <= desired_lead + 0.001:
 		var test_pos := Vector3(
 			anchor_x + forward_x * d,
 			ball_center_y,
 			anchor_z + forward_z * d
 		)
-		if _is_sphere_clearance_blocked(test_pos, bottom_node.radius * 0.85, exclude_rids):
+		if _is_sphere_clearance_blocked(test_pos, ball_col_r * 0.96, exclude_rids):
 			break
-		safe_clearance = d
+		safe_lead = d
 		d += step_size
 
-	bottom_node.body.global_position = Vector3(
-		anchor_x + forward_x * safe_clearance,
-		ball_center_y,
-		anchor_z + forward_z * safe_clearance
-	)
+	var spawn_x := anchor_x + forward_x * safe_lead
+	var spawn_z := anchor_z + forward_z * safe_lead
+
+	# Ensure minimum separation from new_driver so they never overlap on frame 0
+	var sep_xz := Vector2(spawn_x - driver_x, spawn_z - driver_z)
+	var min_sep := new_col_r + ball_col_r + 0.12
+	if sep_xz.length() < min_sep:
+		if is_sprint_launch:
+			# Pull new_driver slightly back along the snake trail instead of pushing ball into a wall
+			driver_x = spawn_x + back_x * min_sep
+			driver_z = spawn_z + back_z * min_sep
+			new_driver.body.global_position.x = driver_x
+			new_driver.body.global_position.z = driver_z
+		else:
+			ball_center_y = floor_y + new_col_r * 2.0 + ball_col_r + 0.06
+
+	bottom_node.body.global_position = Vector3(spawn_x, ball_center_y, spawn_z)
 
 	var base_launch := sprint_roll_forward_speed if is_sprint_launch else roll_forward_speed
 	var carry_factor := 0.75 if is_sprint_launch else 0.35
@@ -1085,7 +1125,7 @@ func roll_bottom_character() -> StackBlob:
 	bottom_node.is_rolling = true
 	bottom_node.is_recalling = false
 	bottom_node.recall_time = 0.0
-	bottom_node.eject_cooldown = 0.65
+	bottom_node.eject_cooldown = 0.95 if is_sprint_launch else 0.65
 	bottom_node.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
 	bottom_node.visual_root.rotation = Vector3.ZERO
 
@@ -1099,7 +1139,8 @@ func roll_bottom_character() -> StackBlob:
 	)
 
 	if is_sprint_launch:
-		var clamped := minf(cur_horiz_speed, sprint_roll_speed)
+		# Brief recoil slowdown on the driver so you don't immediately run over the ball you just bowled
+		var clamped := minf(cur_horiz_speed * 0.72, sprint_roll_speed)
 		if cur_horiz_speed > 0.001:
 			var ratio := clamped / cur_horiz_speed
 			_leader_vel.x *= ratio
@@ -1109,13 +1150,14 @@ func roll_bottom_character() -> StackBlob:
 		_coyote_timer = coyote_time_max
 		_leader_vel = Vector3(
 			-forward_x * 2.0,
-			maxf(_leader_vel.y, 2.5),
+			maxf(_leader_vel.y, 3.2),
 			-forward_z * 2.0
 		)
 
 	for idx in range(_active_nodes.size()):
 		var b := _active_nodes[idx]
-		b.velocity = Vector3.ZERO
+		if not is_sprint_launch:
+			b.velocity = Vector3.ZERO
 		_apply_squash(
 			b,
 			(0.30 if is_sprint_launch else 0.22) - idx * 0.04,
@@ -1128,8 +1170,8 @@ func roll_bottom_character() -> StackBlob:
 	_sync_collider_states()
 	blob_ejected.emit(bottom_node.id, bottom_node.blob_name, true)
 	return bottom_node
-
-# --- Homing Swoop Recall (R) ---
+	
+	# --- Homing Swoop Recall (R) ---
 
 func _get_recall_target_position() -> Vector3:
 	if _active_nodes.is_empty():
@@ -1384,35 +1426,41 @@ func _update_ejected_characters(delta: float) -> void:
 		b.velocity.y = maxf(b.velocity.y - eff_grav * delta, -terminal_velocity)
 
 		b.is_grounded = false
-		var remaining := b.velocity * delta
-		for _slide in range(3):
-			var collision := b.body.move_and_collide(remaining)
-			if collision == null:
-				break
+		var total_move := b.velocity * delta
+		var max_step := maxf(0.15, b.radius * 0.45)
+		var substeps := clampi(int(ceilf(total_move.length() / max_step)), 1, 6)
+		var sub_dt := delta / float(substeps)
 
-			var normal := collision.get_normal()
-			var remainder := collision.get_remainder()
+		for _sub in range(substeps):
+			var remaining := b.velocity * sub_dt
+			for _slide in range(3):
+				var collision := b.body.move_and_collide(remaining, false, 0.004)
+				if collision == null:
+					break
 
-			if normal.y > 0.65:
-				if b.velocity.y < -2.5:
-					b.velocity.y = -b.velocity.y * bounce_restitution
-					_apply_squash(b, 0.28, -0.26)
-				else:
+				var normal := collision.get_normal()
+				var remainder := collision.get_remainder()
+
+				if normal.y > 0.65:
+					if b.velocity.y < -2.5:
+						b.velocity.y = -b.velocity.y * bounce_restitution
+						_apply_squash(b, 0.28, -0.26)
+					else:
+						b.velocity.y = 0.0
+						b.is_grounded = true
+				elif normal.y < -0.65:
+					if b.velocity.y > 2.5:
+						_apply_squash(b, 0.24, -0.22)
 					b.velocity.y = 0.0
-					b.is_grounded = true
-			elif normal.y < -0.65:
-				if b.velocity.y > 2.5:
-					_apply_squash(b, 0.24, -0.22)
-				b.velocity.y = 0.0
-			else:
-				var wall_n := Vector3(normal.x, 0.0, normal.z).normalized()
-				var into_speed := -b.velocity.dot(wall_n)
-				if into_speed > 0.0:
-					b.velocity += wall_n * into_speed * 1.5
-					if into_speed > 2.2:
-						_apply_squash(b, -0.24, 0.22)
+				else:
+					var wall_n := Vector3(normal.x, 0.0, normal.z).normalized()
+					var into_speed := -b.velocity.dot(wall_n)
+					if into_speed > 0.0:
+						b.velocity += wall_n * into_speed * 1.5
+						if into_speed > 2.2:
+							_apply_squash(b, -0.24, 0.22)
 
-			remaining = remainder.slide(normal)
+				remaining = remainder.slide(normal)
 
 		b.squash = b.squash.lerp(Vector3.ZERO, minf(1.0, 14.0 * delta))
 		var horiz_speed := Vector2(b.velocity.x, b.velocity.z).length()
@@ -1450,9 +1498,11 @@ func _update_ejected_characters(delta: float) -> void:
 					1.0 + breath + b.squash.z
 				)
 
-		if b.eject_cooldown <= 0.0 and _stack_swoop_target == null:
+		# Don't accidentally reabsorb a ball that is still actively rolling fast away/ahead
+		var still_fast_rolling := b.is_rolling and horiz_speed > 8.0
+		if b.eject_cooldown <= 0.0 and not still_fast_rolling and _stack_swoop_target == null:
 			var stack_center := get_stack_center()
-			if stack_center.distance_to(b.body.global_position) <= b.radius + 1.1:
+			if stack_center.distance_to(b.body.global_position) <= b.radius + 1.05:
 				_reabsorb_blob(i)
 
 	for i in range(_ejected_nodes.size()):

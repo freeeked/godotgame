@@ -50,11 +50,6 @@ func _refresh_stack_hud() -> void:
 		_hud.update_stack_status(player_stack.get_stack_statuses())
 
 func _setup_hud() -> void:
-	# Remove static placeholder HUD CanvasLayer if present in scene so GameHUD owns the UI cleanly
-	var old_hud := get_node_or_null("HUD")
-	if old_hud != null and not (old_hud is GameHUD):
-		old_hud.queue_free()
-
 	_hud = GameHUD.new()
 	_hud.name = "GameHUD"
 	add_child(_hud)
