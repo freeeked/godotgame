@@ -222,6 +222,10 @@ func _build_blobs() -> void:
 
 		_all_nodes.append(blob)
 
+	for i in range(_all_nodes.size()):
+		for j in range(i + 1, _all_nodes.size()):
+			_all_nodes[i].body.add_collision_exception_with(_all_nodes[j].body)
+
 	_active_nodes = _all_nodes.duplicate()
 	_sync_collider_states()
 
@@ -1077,15 +1081,30 @@ func _find_floor_y(at_pos: Vector3, fallback_feet_y: float, exclude_rids: Array[
 		return (hit["position"] as Vector3).y
 	return fallback_feet_y
 
+func _get_camera_horizontal_forward() -> Vector3:
+	if _last_camera != null:
+		var aim_dir := _get_camera_aim_direction()
+		var flat_aim := Vector3(aim_dir.x, 0.0, aim_dir.z)
+		if flat_aim.length_squared() > 0.0025:
+			return flat_aim.normalized()
+
+		var cam_fwd := -_last_camera.global_transform.basis.z
+		var flat_cam := Vector3(cam_fwd.x, 0.0, cam_fwd.z)
+		if flat_cam.length_squared() > 0.0001:
+			return flat_cam.normalized()
+
+	return Vector3(sin(_facing_angle), 0.0, cos(_facing_angle)).normalized()
+
 func roll_bottom_character() -> StackBlob:
 	if _active_nodes.size() <= 1:
 		return null
 
 	var is_sprint_launch := _is_sprint_rolling
-	var forward_x := sin(_facing_angle)
-	var forward_z := cos(_facing_angle)
-	var back_x := -forward_x
-	var back_z := -forward_z
+	var cam_fwd := _get_camera_horizontal_forward()
+	var forward_x := cam_fwd.x
+	var forward_z := cam_fwd.z
+	_facing_angle = atan2(forward_x, forward_z)
+
 	var exclude_rids := _get_all_blob_rids()
 
 	var prev_driver := _active_nodes[0]
@@ -1102,22 +1121,19 @@ func roll_bottom_character() -> StackBlob:
 	var new_col_r := new_driver.radius * 0.85
 	var ball_col_r := bottom_node.radius * 0.85
 
-	# If sprint-rolling in a snake line, keep new_driver at its current trail position (don't teleport it forward!)
-	# so the remaining snake never snaps/rubber-bands into the launched ball.
-	var driver_x := anchor_x
-	var driver_z := anchor_z
-	if is_sprint_launch:
-		driver_x = new_driver.body.global_position.x
-		driver_z = new_driver.body.global_position.z
+	# Keep new_driver at its exact current XZ (no horizontal teleporting when sprinting or turning)
+	var driver_x := new_driver.body.global_position.x if is_sprint_launch else anchor_x
+	var driver_z := new_driver.body.global_position.z if is_sprint_launch else anchor_z
+	if _is_grounded:
 		var driver_raw_feet := new_driver.body.global_position.y - new_col_r
-		var driver_floor := _find_floor_y(new_driver.body.global_position, driver_raw_feet, exclude_rids) if _is_grounded else driver_raw_feet
+		var driver_floor := _find_floor_y(Vector3(driver_x, new_driver.body.global_position.y, driver_z), driver_raw_feet, exclude_rids)
 		new_driver.body.global_position = Vector3(driver_x, driver_floor + new_col_r + 0.02, driver_z)
 	else:
-		new_driver.body.global_position = Vector3(anchor_x, floor_y + new_col_r + 0.02, anchor_z)
+		new_driver.body.global_position = Vector3(driver_x, new_driver.body.global_position.y if is_sprint_launch else (floor_y + new_col_r + 0.02), driver_z)
 
-	# Spawn the bowled ball from the old leader's front position cleanly above the floor
+	# Sweep forward in the camera's horizontal direction up to desired_lead without clipping into walls
 	var ball_center_y := floor_y + ball_col_r + 0.03
-	var desired_lead := 0.25 if is_sprint_launch else (new_driver.radius + bottom_node.radius + 0.18)
+	var desired_lead := 0.55 if is_sprint_launch else (new_driver.radius + bottom_node.radius + 0.18)
 	var safe_lead := 0.0
 	var step_size := 0.06
 	var d := step_size
@@ -1134,25 +1150,13 @@ func roll_bottom_character() -> StackBlob:
 
 	var spawn_x := anchor_x + forward_x * safe_lead
 	var spawn_z := anchor_z + forward_z * safe_lead
-
-	# Ensure minimum separation from new_driver so they never overlap on frame 0
-	var sep_xz := Vector2(spawn_x - driver_x, spawn_z - driver_z)
-	var min_sep := new_col_r + ball_col_r + 0.12
-	if sep_xz.length() < min_sep:
-		if is_sprint_launch:
-			# Pull new_driver slightly back along the snake trail instead of pushing ball into a wall
-			driver_x = spawn_x + back_x * min_sep
-			driver_z = spawn_z + back_z * min_sep
-			new_driver.body.global_position.x = driver_x
-			new_driver.body.global_position.z = driver_z
-		else:
-			ball_center_y = floor_y + new_col_r * 2.0 + ball_col_r + 0.06
-
 	bottom_node.body.global_position = Vector3(spawn_x, ball_center_y, spawn_z)
 
+	# Carry momentum only along the camera's bowl direction so side/back camera bowls stay crisp
+	var forward_carry := maxf(0.0, _leader_vel.x * forward_x + _leader_vel.z * forward_z)
 	var base_launch := sprint_roll_forward_speed if is_sprint_launch else roll_forward_speed
 	var carry_factor := 0.75 if is_sprint_launch else 0.35
-	var launch_speed := base_launch + cur_horiz_speed * carry_factor
+	var launch_speed := base_launch + forward_carry * carry_factor
 
 	bottom_node.velocity = Vector3(
 		forward_x * launch_speed,
@@ -1177,7 +1181,6 @@ func roll_bottom_character() -> StackBlob:
 	)
 
 	if is_sprint_launch:
-		# Brief recoil slowdown on the driver so you don't immediately run over the ball you just bowled
 		var clamped := minf(cur_horiz_speed * 0.72, sprint_roll_speed)
 		if cur_horiz_speed > 0.001:
 			var ratio := clamped / cur_horiz_speed
@@ -1208,9 +1211,6 @@ func roll_bottom_character() -> StackBlob:
 	_sync_collider_states()
 	blob_ejected.emit(bottom_node.id, bottom_node.blob_name, true)
 	return bottom_node
-	
-	# --- Homing Swoop Recall (R) ---
-
 func _get_recall_target_position() -> Vector3:
 	if _active_nodes.is_empty():
 		return global_position
