@@ -130,8 +130,6 @@ var _stack_hull_node: CollisionShape3D = null
 
 var _is_externally_controlled: bool = false
 var _cannon_ballistic_lock: bool = false
-var _is_externally_controlled: bool = false
-var _cannon_ballistic_lock: bool = false
 var _cannon_air_steer_blend: float = 1.0
 
 func _ready() -> void:
@@ -1770,11 +1768,9 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	if _is_grounded and _leader_vel.y <= 0.0:
 		_launch_momentum_timer = 0.0
 		_cannon_ballistic_lock = false
+		_cannon_air_steer_blend = 1.0
 	else:
 		_launch_momentum_timer = maxf(0.0, _launch_momentum_timer - delta)
-
-	if _cannon_ballistic_lock and has_move_input:
-		_cannon_ballistic_lock = false
 
 	var rolling_with_input := _is_sprint_rolling and has_move_input
 	var active_max_speed := sprint_roll_speed if rolling_with_input else move_speed
@@ -1782,40 +1778,48 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var accel := ground_accel if _is_grounded else air_accel
 	var friction := ground_friction if _is_grounded else air_friction
 
-	if not _cannon_ballistic_lock:
+	if _cannon_ballistic_lock:
 		if has_move_input:
-			_facing_angle = atan2(input_dir.x, input_dir.z)
-			var cur_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-			if _launch_momentum_timer <= 0.0:
-				if _is_grounded:
-					var target_vx := input_dir.x * effective_max_speed
-					var target_vz := input_dir.z * effective_max_speed
-					var turn_rate := 22.0 if _is_sprint_rolling else 24.0
-					var turn_t := 1.0 - exp(-turn_rate * delta)
-					_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
-					_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
-				else:
-					var air_target := maxf(cur_speed, effective_max_speed * 0.96)
-					var target_vx := input_dir.x * air_target
-					var target_vz := input_dir.z * air_target
-					var air_turn_t := 1.0 - exp(-15.0 * delta)
-					_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
-					_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
-					_leader_vel.x += input_dir.x * accel * delta
-					_leader_vel.z += input_dir.z * accel * delta
+			# Gradually ramp in midair influence over ~0.45s instead of snapping velocity
+			_cannon_air_steer_blend = minf(1.0, _cannon_air_steer_blend + delta * 2.2)
+			var steer_accel: float = air_accel * 0.55 * _cannon_air_steer_blend
+			_leader_vel.x += input_dir.x * steer_accel * delta
+			_leader_vel.z += input_dir.z * steer_accel * delta
+			if Vector2(_leader_vel.x, _leader_vel.z).length() > 0.5:
+				_facing_angle = _lerp_angle(_facing_angle, atan2(_leader_vel.x, _leader_vel.z), 6.0 * delta)
+	elif has_move_input:
+		_facing_angle = atan2(input_dir.x, input_dir.z)
+		var cur_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+		if _launch_momentum_timer <= 0.0:
+			if _is_grounded:
+				var target_vx := input_dir.x * effective_max_speed
+				var target_vz := input_dir.z * effective_max_speed
+				var turn_rate := 22.0 if _is_sprint_rolling else 24.0
+				var turn_t := 1.0 - exp(-turn_rate * delta)
+				_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
+				_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
+			else:
+				var air_target := maxf(cur_speed, effective_max_speed * 0.96)
+				var target_vx := input_dir.x * air_target
+				var target_vz := input_dir.z * air_target
+				var air_turn_t := 1.0 - exp(-15.0 * delta)
+				_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
+				_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
+				_leader_vel.x += input_dir.x * accel * delta
+				_leader_vel.z += input_dir.z * accel * delta
 
-			var horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-			if horiz_speed > effective_max_speed:
-				var clamp_ratio := effective_max_speed / horiz_speed
-				_leader_vel.x *= clamp_ratio
-				_leader_vel.z *= clamp_ratio
-		elif _launch_momentum_timer <= 0.0:
-			var damp := exp(-friction * delta)
-			_leader_vel.x *= damp
-			_leader_vel.z *= damp
-			if _is_grounded and Vector2(_leader_vel.x, _leader_vel.z).length() < 0.25:
-				_leader_vel.x = 0.0
-				_leader_vel.z = 0.0
+		var horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+		if horiz_speed > effective_max_speed:
+			var clamp_ratio := effective_max_speed / horiz_speed
+			_leader_vel.x *= clamp_ratio
+			_leader_vel.z *= clamp_ratio
+	elif _launch_momentum_timer <= 0.0:
+		var damp := exp(-friction * delta)
+		_leader_vel.x *= damp
+		_leader_vel.z *= damp
+		if _is_grounded and Vector2(_leader_vel.x, _leader_vel.z).length() < 0.25:
+			_leader_vel.x = 0.0
+			_leader_vel.z = 0.0
 
 	var coyote_limit := coyote_time_max * 1.25 if _is_sprint_rolling else coyote_time_max
 	if _is_grounded:
@@ -1902,7 +1906,6 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_update_sprint_roll_followers(delta, speed_stretch, roll_roundness)
 	else:
 		_update_vertical_stack_followers(delta)
-
 func _update_vertical_stack_followers(delta: float) -> void:
 	var line_heading := _active_nodes[0].pivot.rotation.y
 	for i in range(1, _active_nodes.size()):
@@ -2109,7 +2112,8 @@ func hold_stack_at(world_pos: Vector3, blob_scale: float) -> void:
 func launch_stack_from_cannon(muzzle_pos: Vector3, launch_dir: Vector3, launch_vel: Vector3) -> void:
 	_is_externally_controlled = false
 	_cannon_ballistic_lock = true
-	_launch_momentum_timer = 0.45
+	_cannon_air_steer_blend = 0.0
+	_launch_momentum_timer = 0.65
 	_is_grounded = false
 	_coyote_timer = 0.0
 	_leader_vel = launch_vel
@@ -2155,3 +2159,10 @@ func launch_ejected_blob(body_node: Node3D, muzzle_pos: Vector3, launch_vel: Vec
 			b.visual_root.scale = Vector3.ONE
 			_sync_collider_states()
 			return
+
+func get_speed_fov_ratio() -> float:
+	if _is_sprint_rolling or _stack_swoop_target != null:
+		return 1.0
+	var horiz_speed: float = Vector2(_leader_vel.x, _leader_vel.z).length()
+	# Smoothly ramps from 0 at normal run speed (12.5) to 1 at cannon/boost speed (28+)
+	return clampf((horiz_speed - move_speed) / 16.0, 0.0, 1.0)

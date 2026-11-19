@@ -57,6 +57,7 @@ var _prev_yaw: float = 0.0
 
 var _target_zoom_distance: float = 7.2
 var _current_zoom_distance: float = 7.2
+var _smoothed_boost_ratio: float = 0.0
 var _smoothed_anchor: Vector3 = Vector3.ZERO
 var _prev_anchor: Vector3 = Vector3.ZERO
 var _anchor_vel: Vector3 = Vector3.ZERO
@@ -95,9 +96,24 @@ func _ready() -> void:
 		)
 		player_stack.stack_respawned.connect(func() -> void:
 			_has_anchor = false
+			_smoothed_boost_ratio = 0.0
+			_reset_level_contraptions()
 			_refresh_stack_hud()
 		)
 		_refresh_stack_hud()
+
+func _reset_level_contraptions() -> void:
+	for node: Node in find_children("*", "", true, false):
+		if node.has_method("reset_gate"):
+			node.call("reset_gate")
+		elif node.has_method("reset_scale"):
+			node.call("reset_scale")
+		elif node.has_method("reset_cannon"):
+			node.call("reset_cannon")
+		elif node.has_method("reset_block"):
+			node.call("reset_block")
+		elif node.has_method("reset_powerup"):
+			node.call("reset_powerup")
 
 func get_sound_engine() -> SoundEngine:
 	return _sound
@@ -250,7 +266,6 @@ func _sweep_camera_segment(from_pos: Vector3, to_pos: Vector3, margin: float, ex
 
 	var fractions := get_world_3d().direct_space_state.cast_motion(query)
 	if fractions.size() >= 2:
-		# Never clamp above 0.0 so a wall right against the player pulls the shoulder/camera cleanly inside
 		var safe_t := clampf(fractions[1] - 0.02, 0.0, 1.0)
 		return from_pos + dir * (dist * safe_t)
 
@@ -263,9 +278,7 @@ func _resolve_wall_safe_camera(center_pivot: Vector3, desired_shoulder_pivot: Ve
 			if child is CollisionObject3D:
 				exclude_rids.append((child as CollisionObject3D).get_rid())
 
-	# Stage 1: Sweep from player center out to shoulder offset so shoulder never clips through a wall
 	var safe_shoulder := _sweep_camera_segment(center_pivot, desired_shoulder_pivot, camera_collision_margin, exclude_rids)
-	# Stage 2: Sweep from safe shoulder position back to desired camera position
 	return _sweep_camera_segment(safe_shoulder, desired_cam_pos, camera_collision_margin, exclude_rids)
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -386,7 +399,6 @@ func _physics_process(delta: float) -> void:
 	var right_vec := yaw_basis.x
 	var forward_vec := -yaw_basis.z
 
-	# Cinematic velocity lead & subtle banking roll
 	var target_vel_lead := Vector3.ZERO
 	var target_bank := 0.0
 	if is_fluid:
@@ -400,10 +412,14 @@ func _physics_process(delta: float) -> void:
 	_smoothed_vel_lead = _smoothed_vel_lead.lerp(target_vel_lead, 1.0 - exp(-6.5 * delta))
 	_smoothed_bank_roll = lerpf(_smoothed_bank_roll, target_bank, 1.0 - exp(-8.0 * delta))
 
+	# Smooth, asymmetric boost ratio (expands briskly on boost/cannon, relaxes gently on slow-down)
+	var target_boost_ratio: float = player_stack.get_speed_fov_ratio() if player_stack.has_method("get_speed_fov_ratio") else (1.0 if player_stack.is_high_speed_state() else 0.0)
+	var boost_rate: float = (6.5 if is_fluid else 9.0) if target_boost_ratio > _smoothed_boost_ratio else (2.8 if is_fluid else 3.8)
+	_smoothed_boost_ratio = lerpf(_smoothed_boost_ratio, target_boost_ratio, 1.0 - exp(-boost_rate * delta))
+
 	var active_shoulder := mode_shoulder * lerpf(0.82, 1.25, clampf((zoom_ratio - 0.65) / 1.2, 0.0, 1.0))
 	var up_aim_lift := maxf(0.0, _current_pitch) * 0.95
 
-	# Center pivot stays strictly inside the stack's XZ column so wall sweeps never start outside the map
 	var center_pivot := raw_anchor + Vector3.UP * (mode_pivot_h + up_aim_lift)
 	var desired_shoulder_pivot := (
 		_smoothed_anchor
@@ -414,7 +430,7 @@ func _physics_process(delta: float) -> void:
 	)
 
 	var rot := Basis.from_euler(Vector3(_current_pitch, _current_yaw, 0.0))
-	var dyn_dist := _current_zoom_distance + ((1.45 if is_fluid else 0.95) if player_stack.is_high_speed_state() else 0.0)
+	var dyn_dist := _current_zoom_distance + (1.45 if is_fluid else 0.95) * _smoothed_boost_ratio
 	var desired_cam_pos := desired_shoulder_pivot + rot * Vector3(0.0, 0.0, dyn_dist)
 	var safe_cam_pos := _resolve_wall_safe_camera(center_pivot, desired_shoulder_pivot, desired_cam_pos)
 
@@ -434,5 +450,4 @@ func _physics_process(delta: float) -> void:
 	if absf(_smoothed_bank_roll) > 0.0001:
 		_camera.rotate_object_local(Vector3.FORWARD, _smoothed_bank_roll)
 
-	var target_fov := boost_fov if player_stack.is_high_speed_state() else base_fov
-	_camera.fov = lerpf(_camera.fov, target_fov, 1.0 - exp(-(6.5 if is_fluid else 11.0) * delta))
+	_camera.fov = lerpf(base_fov, boost_fov, _smoothed_boost_ratio)
