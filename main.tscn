@@ -97,7 +97,7 @@ size = Vector3(5, 0.5, 1.4)
 material = SubResource("StandardMaterial3D_stairs")
 
 [node name="Step2" type="CSGBox3D" parent="TestGym/StaircaseZone" unique_id=354940406]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, -1.4)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, -2.0899992)
 use_collision = true
 size = Vector3(5, 1, 1.4)
 material = SubResource("StandardMaterial3D_stairs")
@@ -212,5 +212,9 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.018164, 2.104618, -0.4351859)
+transform = Transform3D(0.5075384, 0, 0.8616291, 0, 1, 0, -0.8616291, 0, 0.5075384, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
+yaw_deg = 59.5
+pitch_deg = 40.0
+launch_speed = 44.5
+preview_gravity = 44.0

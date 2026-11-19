@@ -128,6 +128,12 @@ var _camera_shake_vel: Vector3 = Vector3.ZERO
 var _stack_hull_shape: CapsuleShape3D = null
 var _stack_hull_node: CollisionShape3D = null
 
+var _is_externally_controlled: bool = false
+var _cannon_ballistic_lock: bool = false
+var _is_externally_controlled: bool = false
+var _cannon_ballistic_lock: bool = false
+var _cannon_air_steer_blend: float = 1.0
+
 func _ready() -> void:
 	_build_blobs()
 	respawn(Vector3.ZERO)
@@ -368,6 +374,8 @@ func respawn(spawn_point: Vector3) -> void:
 	_roll_entry_timer = 0.0
 	_roll_exit_timer = 0.0
 	_launch_momentum_timer = 0.0
+	_cannon_ballistic_lock = false
+	_is_externally_controlled = false
 	camera_shake_offset = Vector3.ZERO
 	_camera_shake_vel = Vector3.ZERO
 
@@ -511,11 +519,11 @@ func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> voi
 	if recall_just_pressed:
 		recall_all()
 
-	if _stack_swoop_target != null:
-		_update_stack_swoop(delta)
-	else:
-		_update_active_stack(delta, axes, camera_yaw)
-
+	if not _is_externally_controlled:
+		if _stack_swoop_target != null:
+			_update_stack_swoop(delta)
+		else:
+			_update_active_stack(delta, axes, camera_yaw)
 	_update_ejected_characters(delta)
 	_update_highlight_visuals()
 	_update_camera_shake(delta)
@@ -1761,8 +1769,12 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 
 	if _is_grounded and _leader_vel.y <= 0.0:
 		_launch_momentum_timer = 0.0
+		_cannon_ballistic_lock = false
 	else:
 		_launch_momentum_timer = maxf(0.0, _launch_momentum_timer - delta)
+
+	if _cannon_ballistic_lock and has_move_input:
+		_cannon_ballistic_lock = false
 
 	var rolling_with_input := _is_sprint_rolling and has_move_input
 	var active_max_speed := sprint_roll_speed if rolling_with_input else move_speed
@@ -1770,39 +1782,40 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var accel := ground_accel if _is_grounded else air_accel
 	var friction := ground_friction if _is_grounded else air_friction
 
-	if has_move_input:
-		_facing_angle = atan2(input_dir.x, input_dir.z)
-		var cur_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-		if _launch_momentum_timer <= 0.0:
-			if _is_grounded:
-				var target_vx := input_dir.x * effective_max_speed
-				var target_vz := input_dir.z * effective_max_speed
-				var turn_rate := 22.0 if _is_sprint_rolling else 24.0
-				var turn_t := 1.0 - exp(-turn_rate * delta)
-				_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
-				_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
-			else:
-				var air_target := maxf(cur_speed, effective_max_speed * 0.96)
-				var target_vx := input_dir.x * air_target
-				var target_vz := input_dir.z * air_target
-				var air_turn_t := 1.0 - exp(-15.0 * delta)
-				_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
-				_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
-				_leader_vel.x += input_dir.x * accel * delta
-				_leader_vel.z += input_dir.z * accel * delta
+	if not _cannon_ballistic_lock:
+		if has_move_input:
+			_facing_angle = atan2(input_dir.x, input_dir.z)
+			var cur_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+			if _launch_momentum_timer <= 0.0:
+				if _is_grounded:
+					var target_vx := input_dir.x * effective_max_speed
+					var target_vz := input_dir.z * effective_max_speed
+					var turn_rate := 22.0 if _is_sprint_rolling else 24.0
+					var turn_t := 1.0 - exp(-turn_rate * delta)
+					_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
+					_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
+				else:
+					var air_target := maxf(cur_speed, effective_max_speed * 0.96)
+					var target_vx := input_dir.x * air_target
+					var target_vz := input_dir.z * air_target
+					var air_turn_t := 1.0 - exp(-15.0 * delta)
+					_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
+					_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
+					_leader_vel.x += input_dir.x * accel * delta
+					_leader_vel.z += input_dir.z * accel * delta
 
-		var horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-		if horiz_speed > effective_max_speed:
-			var clamp_ratio := effective_max_speed / horiz_speed
-			_leader_vel.x *= clamp_ratio
-			_leader_vel.z *= clamp_ratio
-	elif _launch_momentum_timer <= 0.0:
-		var damp := exp(-friction * delta)
-		_leader_vel.x *= damp
-		_leader_vel.z *= damp
-		if _is_grounded and Vector2(_leader_vel.x, _leader_vel.z).length() < 0.25:
-			_leader_vel.x = 0.0
-			_leader_vel.z = 0.0
+			var horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+			if horiz_speed > effective_max_speed:
+				var clamp_ratio := effective_max_speed / horiz_speed
+				_leader_vel.x *= clamp_ratio
+				_leader_vel.z *= clamp_ratio
+		elif _launch_momentum_timer <= 0.0:
+			var damp := exp(-friction * delta)
+			_leader_vel.x *= damp
+			_leader_vel.z *= damp
+			if _is_grounded and Vector2(_leader_vel.x, _leader_vel.z).length() < 0.25:
+				_leader_vel.x = 0.0
+				_leader_vel.z = 0.0
 
 	var coyote_limit := coyote_time_max * 1.25 if _is_sprint_rolling else coyote_time_max
 	if _is_grounded:
@@ -2070,3 +2083,75 @@ func get_stack_statuses() -> Array[Dictionary]:
 
 func is_high_speed_state() -> bool:
 	return _is_sprint_rolling or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25
+
+# --- Cannon & Contraption Helpers ---
+
+func is_externally_controlled() -> bool:
+	return _is_externally_controlled
+
+func set_external_control(enabled: bool) -> void:
+	_is_externally_controlled = enabled
+	if enabled:
+		_cannon_ballistic_lock = false
+		_cancel_stack_swoop()
+
+func get_active_blob_positions() -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for b: StackBlob in _active_nodes:
+		out.append(b.body.global_position)
+	return out
+
+func hold_stack_at(world_pos: Vector3, blob_scale: float) -> void:
+	for b: StackBlob in _active_nodes:
+		b.body.global_position = world_pos
+		b.visual_root.scale = Vector3.ONE * blob_scale
+
+func launch_stack_from_cannon(muzzle_pos: Vector3, launch_dir: Vector3, launch_vel: Vector3) -> void:
+	_is_externally_controlled = false
+	_cannon_ballistic_lock = true
+	_launch_momentum_timer = 0.45
+	_is_grounded = false
+	_coyote_timer = 0.0
+	_leader_vel = launch_vel
+
+	if Vector2(launch_dir.x, launch_dir.z).length() > 0.05:
+		_facing_angle = atan2(launch_dir.x, launch_dir.z)
+
+	for i: int in range(_active_nodes.size()):
+		var b: StackBlob = _active_nodes[i]
+		b.body.global_position = muzzle_pos + launch_dir * (float(i) * 0.85)
+		b.body.velocity = launch_vel
+		b.velocity = Vector3.ZERO
+		b.visual_root.scale = Vector3.ONE
+		b.pivot.rotation.y = _facing_angle
+		_apply_squash(b, -0.25 + float(i) * 0.02, 0.30 - float(i) * 0.02)
+
+func get_ejected_blob_nodes() -> Array[Node3D]:
+	var out: Array[Node3D] = []
+	for b: StackBlob in _ejected_nodes:
+		if not _dead_nodes.has(b) and not _locked_ejected_nodes.has(b) and not b.is_recalling:
+			out.append(b.body)
+	return out
+
+func lock_ejected_blob(body_node: Node3D, locked: bool) -> void:
+	for b: StackBlob in _ejected_nodes:
+		if b.body == body_node:
+			if locked:
+				_locked_ejected_nodes[b] = true
+			else:
+				_locked_ejected_nodes.erase(b)
+			_sync_collider_states()
+			return
+
+func launch_ejected_blob(body_node: Node3D, muzzle_pos: Vector3, launch_vel: Vector3) -> void:
+	for b: StackBlob in _ejected_nodes:
+		if b.body == body_node:
+			_locked_ejected_nodes.erase(b)
+			b.body.global_position = muzzle_pos
+			b.velocity = launch_vel
+			b.is_grounded = false
+			b.is_rolling = false
+			b.eject_cooldown = 0.35
+			b.visual_root.scale = Vector3.ONE
+			_sync_collider_states()
+			return
