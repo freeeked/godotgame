@@ -8,6 +8,9 @@ signal blob_void_died(blob_id: int, blob_name: String)
 signal stack_respawned()
 signal target_lock_changed(blob_id: int, blob_name: String, is_locked: bool)
 signal stack_swap_completed(new_leader_id: int, new_leader_name: String)
+signal jumped(stack_count: int, is_air_combo: bool)
+signal landed(impact_speed: float, stack_count: int)
+signal bounced(speed: float)
 
 @export_group("Movement & Jump")
 @export var move_speed: float = 12.5
@@ -1135,6 +1138,7 @@ func eject_top_character() -> StackBlob:
 	_sync_collider_states()
 	blob_ejected.emit(top_node.id, top_node.blob_name, false)
 	return top_node
+
 func _find_floor_y(at_pos: Vector3, fallback_feet_y: float, exclude_rids: Array[RID]) -> float:
 	var space_state := get_world_3d().direct_space_state
 	var ray_from := Vector3(at_pos.x, at_pos.y + 1.2, at_pos.z)
@@ -1273,6 +1277,7 @@ func roll_bottom_character() -> StackBlob:
 	_sync_collider_states()
 	blob_ejected.emit(bottom_node.id, bottom_node.blob_name, true)
 	return bottom_node
+
 func _get_recall_target_position() -> Vector3:
 	if _active_nodes.is_empty():
 		return global_position
@@ -1549,6 +1554,8 @@ func _update_ejected_characters(delta: float) -> void:
 		var max_step := maxf(0.15, b.radius * 0.45)
 		var substeps := clampi(int(ceilf(total_move.length() / max_step)), 1, 6)
 		var sub_dt := delta / float(substeps)
+		var did_bounce := false
+		var peak_bounce_speed := 0.0
 
 		for _sub in range(substeps):
 			var remaining := b.velocity * sub_dt
@@ -1562,14 +1569,19 @@ func _update_ejected_characters(delta: float) -> void:
 
 				if normal.y > 0.65:
 					if b.velocity.y < -2.5:
+						var fall_spd := absf(b.velocity.y)
 						b.velocity.y = -b.velocity.y * bounce_restitution
 						_apply_squash(b, 0.28, -0.26)
+						did_bounce = true
+						peak_bounce_speed = maxf(peak_bounce_speed, fall_spd)
 					else:
 						b.velocity.y = 0.0
 						b.is_grounded = true
 				elif normal.y < -0.65:
 					if b.velocity.y > 2.5:
 						_apply_squash(b, 0.24, -0.22)
+						did_bounce = true
+						peak_bounce_speed = maxf(peak_bounce_speed, b.velocity.y)
 					b.velocity.y = 0.0
 				else:
 					var wall_n := Vector3(normal.x, 0.0, normal.z).normalized()
@@ -1578,8 +1590,13 @@ func _update_ejected_characters(delta: float) -> void:
 						b.velocity += wall_n * into_speed * 1.5
 						if into_speed > 2.2:
 							_apply_squash(b, -0.24, 0.22)
+							did_bounce = true
+							peak_bounce_speed = maxf(peak_bounce_speed, into_speed)
 
 				remaining = remainder.slide(normal)
+
+		if did_bounce:
+			bounced.emit(peak_bounce_speed)
 
 		b.squash = b.squash.lerp(Vector3.ZERO, minf(1.0, 14.0 * delta))
 		var horiz_speed := Vector2(b.velocity.x, b.velocity.z).length()
@@ -1649,6 +1666,7 @@ func _update_ejected_characters(delta: float) -> void:
 					b.velocity += normal * impulse
 					_apply_squash(a, -0.2, 0.2)
 					_apply_squash(b, -0.2, 0.2)
+					bounced.emit(absf(rel_vel))
 
 # --- Active Stack Movement & Sprint-Roll ---
 
@@ -1796,12 +1814,14 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var can_coyote_jump := _coyote_timer > 0.0 and not _is_grounded
 	var can_combo_air_jump := _has_air_combo_jump and not _is_grounded
 	if (_is_grounded or can_coyote_jump or can_combo_air_jump) and _jump_buffer_timer > 0.0:
-		if can_combo_air_jump and not can_coyote_jump:
+		var is_combo_air := can_combo_air_jump and not can_coyote_jump
+		if is_combo_air:
 			_has_air_combo_jump = false
 		_leader_vel.y = jump_force
 		_is_grounded = false
 		_coyote_timer = 0.0
 		_jump_buffer_timer = 0.0
+		jumped.emit(_active_nodes.size(), is_combo_air)
 
 		for idx in range(_active_nodes.size()):
 			var b := _active_nodes[idx]
@@ -1833,6 +1853,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_leader_vel.y = bottom.body.velocity.y
 
 	if not was_grounded and _is_grounded and impact_speed > 3.0:
+		landed.emit(impact_speed, _active_nodes.size())
 		var intensity := clampf(impact_speed / 22.0, 0.35, 1.0)
 		for idx in range(_active_nodes.size()):
 			var b := _active_nodes[idx]
@@ -1868,6 +1889,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_update_sprint_roll_followers(delta, speed_stretch, roll_roundness)
 	else:
 		_update_vertical_stack_followers(delta)
+
 func _update_vertical_stack_followers(delta: float) -> void:
 	var line_heading := _active_nodes[0].pivot.rotation.y
 	for i in range(1, _active_nodes.size()):
@@ -2030,7 +2052,7 @@ func _update_squash_springs(delta: float) -> void:
 func _lerp_angle(a: float, b: float, t: float) -> float:
 	var diff := fposmod(b - a + PI, TAU) - PI
 	return a + diff * minf(1.0, t)
-	
+
 func get_stack_statuses() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for b in _all_nodes:

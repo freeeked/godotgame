@@ -47,6 +47,7 @@ enum CameraFeelMode {
 var _camera_rig: Node3D
 var _camera: Camera3D
 var _hud: GameHUD
+var _sound: SoundEngine
 
 var _target_yaw: float = 0.0
 var _target_pitch: float = -0.16
@@ -63,6 +64,7 @@ var _smoothed_vel_lead: Vector3 = Vector3.ZERO
 var _smoothed_bank_roll: float = 0.0
 var _has_anchor: bool = false
 var _current_level_idx: int = 0
+var _roll_tick_accum: float = 0.0
 
 func _ready() -> void:
 	var default_dist := _get_mode_follow_distance()
@@ -72,6 +74,7 @@ func _ready() -> void:
 	_setup_lighting_if_needed()
 	_setup_camera()
 	_setup_hud()
+	_setup_sound()
 
 	if player_stack != null:
 		player_stack.target_lock_changed.connect(func(_id: int, _blob_name: String, is_locked: bool) -> void:
@@ -96,9 +99,72 @@ func _ready() -> void:
 		)
 		_refresh_stack_hud()
 
+func get_sound_engine() -> SoundEngine:
+	return _sound
+
+func _setup_sound() -> void:
+	_sound = get_node_or_null("SoundEngine") as SoundEngine
+	if _sound == null:
+		_sound = SoundEngine.new()
+		_sound.name = "SoundEngine"
+		add_child(_sound)
+
+	if player_stack != null:
+		player_stack.jumped.connect(func(stack_count: int, is_air_combo: bool) -> void:
+			var pitch := (1.16 if is_air_combo else 1.0) + float(3 - stack_count) * 0.06
+			_sound.play(&"jump", 0.9, pitch)
+		)
+		player_stack.landed.connect(func(impact_speed: float, stack_count: int) -> void:
+			var vol := clampf(impact_speed / 18.0, 0.25, 1.0)
+			var pitch := 0.92 + float(3 - stack_count) * 0.07
+			_sound.play(&"land", vol, pitch)
+		)
+		player_stack.bounced.connect(func(speed: float) -> void:
+			_sound.play(&"bounce", clampf(speed / 16.0, 0.2, 0.9))
+		)
+		player_stack.blob_ejected.connect(func(_id: int, _name: String, is_roll: bool) -> void:
+			_sound.play(&"roll_start" if is_roll else &"eject", 0.95)
+		)
+		player_stack.blob_reabsorbed.connect(func(_id: int, _name: String, was_recalling: bool) -> void:
+			_sound.play(&"recall", 0.85 if was_recalling else 0.7, 1.05 if was_recalling else 0.95)
+		)
+		player_stack.stack_swap_completed.connect(func(_id: int, _name: String) -> void:
+			_sound.play(&"tube_shoot", 0.85, 1.12)
+		)
+		player_stack.blob_void_died.connect(func(_id: int, _name: String) -> void:
+			_sound.play(&"explode", 0.75)
+		)
+		player_stack.stack_respawned.connect(func() -> void:
+			_sound.stop_roll_hum(0.05)
+			_roll_tick_accum = 0.0
+			_sound.play(&"ui_back", 0.75)
+		)
+		player_stack.target_lock_changed.connect(func(_id: int, _blob_name: String, is_locked: bool) -> void:
+			if is_locked:
+				_sound.play(&"ui_hover", 0.55, 1.15)
+		)
+
+	if _hud != null:
+		_hud.mute_toggled.connect(func(muted: bool) -> void:
+			_sound.set_muted(muted)
+			if not muted:
+				_sound.play(&"ui_click", 0.8)
+		)
+		_hud.level_selected.connect(func(_idx: int) -> void:
+			_sound.play(&"ui_click", 0.85)
+		)
+		_hud.next_level_requested.connect(func() -> void:
+			_sound.play(&"win", 0.9)
+		)
+		_hud.restart_requested.connect(func() -> void:
+			_sound.play(&"ui_back", 0.85)
+		)
+
 func toggle_camera_mode() -> void:
 	camera_mode = CameraFeelMode.CINEMATIC_FLUID if camera_mode == CameraFeelMode.SNAPPY else CameraFeelMode.SNAPPY
 	_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
+	if _sound != null:
+		_sound.play(&"ui_slide", 0.65)
 
 func _get_mode_follow_distance() -> float:
 	return fluid_follow_distance if camera_mode == CameraFeelMode.CINEMATIC_FLUID else snappy_follow_distance
@@ -129,6 +195,8 @@ func _setup_hud() -> void:
 	)
 	_hud.gameplay_resumed.connect(func() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if _sound != null:
+			_sound.play(&"ui_click", 0.75)
 	)
 
 func _setup_lighting_if_needed() -> void:
@@ -205,6 +273,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.physical_keycode == KEY_ESCAPE:
 			if _hud != null:
 				_hud.toggle_pause()
+			if _sound != null:
+				_sound.play(&"ui_back", 0.75)
 			return
 
 	if _hud != null and _hud.is_gameplay_blocked():
@@ -228,6 +298,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_target_yaw = 0.0
 			_target_pitch = -0.16
 			_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
+			if _sound != null:
+				_sound.play(&"ui_slide", 0.55, 1.1)
 
 func _physics_process(delta: float) -> void:
 	if player_stack == null:
@@ -257,6 +329,22 @@ func _physics_process(delta: float) -> void:
 		_target_pitch = clampf(_target_pitch + orbit_y * key_orbit_speed * delta, -0.75, 0.85)
 
 		player_stack.step_stack(delta, _target_yaw, _camera)
+
+	# Continuous sprint-roll hum & rhythmic roll ticks
+	if _sound != null:
+		var horiz_speed := Vector2(player_stack._leader_vel.x, player_stack._leader_vel.z).length()
+		var rolling_on_ground := player_stack._is_sprint_rolling and player_stack._is_grounded and horiz_speed > 2.0 and not blocked
+		if rolling_on_ground:
+			_sound.start_roll_hum(0.14)
+			var speed_ratio := clampf(horiz_speed / player_stack.sprint_roll_speed, 0.2, 1.2)
+			_sound.set_roll_hum_volume(0.08 + 0.14 * speed_ratio, 0.85 + 0.35 * speed_ratio)
+			_roll_tick_accum += horiz_speed * delta
+			if _roll_tick_accum >= 2.6:
+				_roll_tick_accum = 0.0
+				_sound.play(&"roll_tick", 0.35 * speed_ratio, 0.92 + 0.18 * speed_ratio)
+		else:
+			_sound.stop_roll_hum(0.14)
+			_roll_tick_accum = 0.0
 
 	var is_fluid := camera_mode == CameraFeelMode.CINEMATIC_FLUID
 	var mode_dist := fluid_follow_distance if is_fluid else snappy_follow_distance
