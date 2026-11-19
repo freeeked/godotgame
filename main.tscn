@@ -3,6 +3,7 @@
 [ext_resource type="Script" uid="uid://8wi1qs1f6e50" path="res://scripts/test_main.gd" id="1_0xm2m"]
 [ext_resource type="Script" uid="uid://dhtrm6jnaexc7" path="res://scripts/player_stack.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
+[ext_resource type="Script" uid="uid://8hryct2ausxj" path="res://scripts/turret_cannon.gd" id="7_trcan"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
 albedo_color = Color(0.24, 0.29, 0.37, 1)
@@ -209,3 +210,7 @@ material = SubResource("StandardMaterial3D_gold")
 
 [node name="SoundEngine" type="Node" parent="." unique_id=321402970]
 script = ExtResource("3_h2yge")
+
+[node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.018164, 2.104618, -0.4351859)
+script = ExtResource("7_trcan")
