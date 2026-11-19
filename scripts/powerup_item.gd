@@ -1,3 +1,4 @@
+@tool
 class_name PowerupItem
 extends Node3D
 
@@ -8,27 +9,56 @@ enum PowerupType {
 
 signal collected(powerup_type: PowerupType, collector: Node3D)
 
-@export var powerup_type: PowerupType = PowerupType.PYRAMID
-@export var tint_color: Color = Color("facc15")
+@export_group("Powerup Settings")
+@export var powerup_type: PowerupType = PowerupType.PYRAMID:
+	set(value):
+		powerup_type = value
+		_rebuild()
+
+@export var tint_color: Color = Color("facc15"):
+	set(value):
+		tint_color = value
+		_rebuild()
+
+@export var hover_height: float = 1.15:
+	set(value):
+		hover_height = maxf(0.2, value)
+		_rebuild()
+
 @export var respawn_seconds: float = 4.0
+
+@export_group("Editor Guides")
+@export var show_editor_guides: bool = true:
+	set(value):
+		show_editor_guides = value
+		_rebuild()
 
 var _visual_pivot: Node3D
 var _area: Area3D
-var _base_y: float = 1.15
 var _collected: bool = false
 var _respawn_timer: float = 0.0
 var _elapsed: float = 0.0
 
 func _ready() -> void:
+	_rebuild()
+
+func _rebuild() -> void:
+	if not is_inside_tree():
+		return
+
+	for child: Node in get_children():
+		remove_child(child)
+		child.queue_free()
+
 	_visual_pivot = Node3D.new()
-	_visual_pivot.position.y = _base_y
+	_visual_pivot.position.y = hover_height
 	add_child(_visual_pivot)
 
-	var mesh_inst := MeshInstance3D.new()
-	var mat := StandardMaterial3D.new()
+	var mesh_inst: MeshInstance3D = MeshInstance3D.new()
+	var mat: StandardMaterial3D = StandardMaterial3D.new()
 
 	if powerup_type == PowerupType.BOMB:
-		var sphere := SphereMesh.new()
+		var sphere: SphereMesh = SphereMesh.new()
 		sphere.radius = 0.56
 		sphere.height = 1.12
 		mesh_inst.mesh = sphere
@@ -39,7 +69,7 @@ func _ready() -> void:
 		mat.emission = Color("f97316")
 		mat.emission_energy_multiplier = 0.35
 	else:
-		var cone := CylinderMesh.new()
+		var cone: CylinderMesh = CylinderMesh.new()
 		cone.top_radius = 0.0
 		cone.bottom_radius = 0.62
 		cone.height = 1.05
@@ -56,24 +86,41 @@ func _ready() -> void:
 	_visual_pivot.add_child(mesh_inst)
 
 	_area = Area3D.new()
-	_area.position.y = _base_y
+	_area.position.y = hover_height
 	_area.monitoring = true
 	_area.monitorable = false
 	_area.collision_mask = 1
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
+	var col: CollisionShape3D = CollisionShape3D.new()
+	var box: BoxShape3D = BoxShape3D.new()
 	box.size = Vector3(1.5, 1.6, 1.5)
 	col.shape = box
 	_area.add_child(col)
 	add_child(_area)
 
-	_area.body_entered.connect(_on_body_entered)
+	if not Engine.is_editor_hint():
+		_area.body_entered.connect(_on_body_entered)
+	elif show_editor_guides:
+		var guide_mat: StandardMaterial3D = StandardMaterial3D.new()
+		guide_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		guide_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var accent: Color = Color("f97316") if powerup_type == PowerupType.BOMB else tint_color
+		guide_mat.albedo_color = Color(accent.r, accent.g, accent.b, 0.35)
+
+		var ring: MeshInstance3D = MeshInstance3D.new()
+		var torus: TorusMesh = TorusMesh.new()
+		torus.inner_radius = 0.72
+		torus.outer_radius = 0.82
+		ring.mesh = torus
+		ring.material_override = guide_mat
+		ring.position.y = 0.04
+		add_child(ring)
 
 func reset_powerup() -> void:
 	_collected = false
 	_respawn_timer = 0.0
 	visible = true
-	_area.set_deferred("monitoring", true)
+	if _area != null:
+		_area.set_deferred("monitoring", true)
 
 func _on_body_entered(body: Node3D) -> void:
 	if _collected:
@@ -83,13 +130,16 @@ func _on_body_entered(body: Node3D) -> void:
 	visible = false
 	_area.set_deferred("monitoring", false)
 
-	var sfx := get_tree().root.find_child("SoundEngine", true, false) as SoundEngine
+	var sfx: SoundEngine = get_tree().root.find_child("SoundEngine", true, false) as SoundEngine
 	if sfx != null:
 		sfx.play(&"recall", 1.0)
 
 	collected.emit(powerup_type, body)
 
 func _process(delta: float) -> void:
+	if Engine.is_editor_hint() or _visual_pivot == null:
+		return
+
 	_elapsed += delta
 	if _collected:
 		if respawn_seconds > 0.0:
@@ -98,5 +148,5 @@ func _process(delta: float) -> void:
 				reset_powerup()
 		return
 
-	_visual_pivot.position.y = _base_y + sin(_elapsed * 3.2) * 0.18
+	_visual_pivot.position.y = hover_height + sin(_elapsed * 3.2) * 0.18
 	_visual_pivot.rotation.y = _elapsed * 2.0

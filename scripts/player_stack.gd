@@ -2089,6 +2089,7 @@ func is_high_speed_state() -> bool:
 
 # --- Cannon & Contraption Helpers ---
 
+
 func is_externally_controlled() -> bool:
 	return _is_externally_controlled
 

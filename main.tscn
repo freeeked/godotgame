@@ -3,6 +3,8 @@
 [ext_resource type="Script" uid="uid://8wi1qs1f6e50" path="res://scripts/test_main.gd" id="1_0xm2m"]
 [ext_resource type="Script" uid="uid://dhtrm6jnaexc7" path="res://scripts/player_stack.gd" id="1_ig7tw"]
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
+[ext_resource type="Script" uid="uid://mrqkgdga252i" path="res://scripts/button_gate.gd" id="5_lquwl"]
+[ext_resource type="Script" uid="uid://dh2wrwbih5w81" path="res://scripts/pneumatic_tube.gd" id="6_7mycd"]
 [ext_resource type="Script" uid="uid://8hryct2ausxj" path="res://scripts/turret_cannon.gd" id="7_trcan"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
@@ -212,9 +214,21 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.73042786, -2.6822087e-07, 0.6829898, 0.5527569, 0.58736855, 0.5911497, -0.40116692, 0.8093194, -0.42903027, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.73042774, -5.6624407e-07, 0.68298995, 0.55275685, 0.5873687, 0.59114957, -0.40116727, 0.8093194, -0.42903012, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
-yaw_deg = 122.135605
+yaw_deg = 122.13558
 pitch_deg = 40.0
 launch_speed = 44.5
 preview_gravity = 44.0
+
+[node name="ButtonGate" type="Node3D" parent="." unique_id=1710796482]
+transform = Transform3D(0.99656254, 0, 0.08284399, 0, 1, 0, -0.08284399, 0, 0.99656254, 21.233, 0.166, 7.555)
+script = ExtResource("5_lquwl")
+button_offset = Vector3(-12.11, 1.89, 7.59)
+button_size = 4.0
+gate_depth = 0.4
+lift_height = 1.88
+
+[node name="PneumaticTube" type="Node3D" parent="." unique_id=1309072378]
+transform = Transform3D(-0.9490624, 0.10367357, -0.2975442, 0.09095094, 0.9942609, 0.056329302, 0.30167648, 0.026398119, -0.9530449, 3.2034311, 2.3501616, 11.847433)
+script = ExtResource("6_7mycd")

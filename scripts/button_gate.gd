@@ -1,18 +1,49 @@
+@tool
 class_name ButtonGate
 extends Node3D
 
 @export_group("Button Pad")
-@export var button_offset: Vector3 = Vector3(-6.5, 0.0, 2.5)
-@export var button_size: float = 2.4
+@export var button_offset: Vector3 = Vector3(-6.5, 0.0, 2.5):
+	set(value):
+		button_offset = value
+		_rebuild()
+
+@export var button_size: float = 2.4:
+	set(value):
+		button_size = maxf(0.6, value)
+		_rebuild()
+
 @export var button_press_depth: float = 0.14
 
 @export_group("Archway & Gate")
-@export var gate_width: float = 6.4
-@export var gate_height: float = 4.8
-@export var gate_depth: float = 1.1
-@export var lift_height: float = 4.2
+@export var gate_width: float = 6.4:
+	set(value):
+		gate_width = maxf(2.6, value)
+		_rebuild()
+
+@export var gate_height: float = 4.8:
+	set(value):
+		gate_height = maxf(2.2, value)
+		_rebuild()
+
+@export var gate_depth: float = 1.1:
+	set(value):
+		gate_depth = maxf(0.4, value)
+		_rebuild()
+
+@export var lift_height: float = 4.2:
+	set(value):
+		lift_height = maxf(0.5, value)
+		_rebuild()
+
 @export var open_speed: float = 1.75
 @export var close_speed: float = 1.45
+
+@export_group("Editor Guides")
+@export var show_editor_guides: bool = true:
+	set(value):
+		show_editor_guides = value
+		_rebuild()
 
 var _pad_body: Node3D
 var _pad_mat: StandardMaterial3D
@@ -28,8 +59,20 @@ var _was_pressed: bool = false
 var _move_sound_timer: float = 0.0
 
 func _ready() -> void:
+	_rebuild()
+
+func _rebuild() -> void:
+	if not is_inside_tree():
+		return
+
+	for child: Node in get_children():
+		remove_child(child)
+		child.queue_free()
+
 	_build_button()
 	_build_arch_and_gate()
+	if Engine.is_editor_hint() and show_editor_guides:
+		_build_editor_guides()
 	reset_gate()
 
 func _get_sound_engine() -> SoundEngine:
@@ -176,17 +219,70 @@ func _build_arch_and_gate() -> void:
 	gate_col.shape = gate_shape
 	_bars_body.add_child(gate_col)
 
+func _build_editor_guides() -> void:
+	var guide_mat: StandardMaterial3D = StandardMaterial3D.new()
+	guide_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	guide_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	guide_mat.albedo_color = Color(0.98, 0.45, 0.09, 0.75)
+
+	# Dashed link line connecting the button pad to the gate
+	var start_pt: Vector3 = button_offset + Vector3(0.0, 0.2, 0.0)
+	var end_pt: Vector3 = Vector3(0.0, 0.2, 0.0)
+	var total_dist: float = start_pt.distance_to(end_pt)
+	if total_dist > 0.2:
+		var steps: int = maxi(2, int(round(total_dist / 0.65)))
+		var dir: Vector3 = (end_pt - start_pt).normalized()
+		for i: int in range(steps):
+			var t0: float = float(i) / float(steps)
+			var t1: float = (float(i) + 0.6) / float(steps)
+			var p0: Vector3 = start_pt.lerp(end_pt, t0)
+			var p1: Vector3 = start_pt.lerp(end_pt, t1)
+			var seg_len: float = p0.distance_to(p1)
+			if seg_len < 0.02:
+				continue
+			var dash: MeshInstance3D = MeshInstance3D.new()
+			var cyl: CylinderMesh = CylinderMesh.new()
+			cyl.top_radius = 0.045
+			cyl.bottom_radius = 0.045
+			cyl.height = seg_len
+			dash.mesh = cyl
+			dash.material_override = guide_mat
+			dash.position = (p0 + p1) * 0.5
+			if absf(dir.dot(Vector3.UP)) < 0.999:
+				dash.quaternion = Quaternion(Vector3.UP, dir)
+			add_child(dash)
+
+	# Ghost box showing where the gate bars sit at full lift_height
+	var inner_w: float = maxf(1.2, gate_width - 1.8)
+	var inner_h: float = maxf(1.2, gate_height - 0.95)
+	var ghost_bars: MeshInstance3D = MeshInstance3D.new()
+	var ghost_box: BoxMesh = BoxMesh.new()
+	ghost_box.size = Vector3(inner_w, inner_h, 0.22)
+	ghost_bars.mesh = ghost_box
+	var ghost_mat: StandardMaterial3D = StandardMaterial3D.new()
+	ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ghost_mat.albedo_color = Color(0.98, 0.45, 0.09, 0.24)
+	ghost_bars.material_override = ghost_mat
+	ghost_bars.position = Vector3(0.0, inner_h * 0.5 + lift_height, 0.0)
+	add_child(ghost_bars)
+
 func reset_gate() -> void:
 	_open_progress = 0.0
 	_is_pressed = false
 	_was_pressed = false
 	_move_sound_timer = 0.0
-	_pad_body.position.y = _pad_rest_y
-	_bars_body.position.y = _closed_bars_y
-	_bars_body.collision_layer = 1
-	_bars_body.collision_mask = 1
+	if _pad_body != null:
+		_pad_body.position.y = _pad_rest_y
+	if _bars_body != null:
+		_bars_body.position.y = _closed_bars_y
+		_bars_body.collision_layer = 1
+		_bars_body.collision_mask = 1
 
 func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint() or _trigger_area == null:
+		return
+
 	_is_pressed = _trigger_area.get_overlapping_bodies().size() > 0 or _trigger_area.get_overlapping_areas().size() > 0
 	var sfx: SoundEngine = _get_sound_engine()
 
