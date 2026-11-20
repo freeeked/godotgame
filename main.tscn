@@ -5,6 +5,7 @@
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
 [ext_resource type="Script" uid="uid://mrqkgdga252i" path="res://scripts/button_gate.gd" id="5_lquwl"]
 [ext_resource type="Script" uid="uid://dh2wrwbih5w81" path="res://scripts/pneumatic_tube.gd" id="6_7mycd"]
+[ext_resource type="Shader" uid="uid://n2o7kespljyg" path="res://shaders/comic_pixel_filter.gdshader" id="7_272bh"]
 [ext_resource type="Script" uid="uid://8hryct2ausxj" path="res://scripts/turret_cannon.gd" id="7_trcan"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
@@ -30,6 +31,17 @@ roughness = 0.55
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gold"]
 albedo_color = Color(0.96, 0.78, 0.15, 1)
 roughness = 0.45
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_272bh"]
+shader = ExtResource("7_272bh")
+shader_parameter/enable_pixelation = true
+shader_parameter/pixel_size = 2.0
+shader_parameter/enable_outlines = true
+shader_parameter/outline_color = Color(0.06, 0.07, 0.11, 1)
+shader_parameter/outline_thickness = 1.25
+shader_parameter/edge_threshold = 0.2
+shader_parameter/color_posterize_steps = 0.0
+shader_parameter/scanline_strength = 0.06
 
 [node name="Main" type="Node3D" unique_id=276455839]
 script = ExtResource("1_0xm2m")
@@ -214,7 +226,7 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.73042774, -5.6624407e-07, 0.68298995, 0.55275685, 0.5873687, 0.59114957, -0.40116727, 0.8093194, -0.42903012, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.7304277, -6.258487e-07, 0.68299, 0.5527568, 0.5873689, 0.5911494, -0.4011675, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
 yaw_deg = 122.13558
 pitch_deg = 40.0
@@ -232,3 +244,16 @@ lift_height = 1.88
 [node name="PneumaticTube" type="Node3D" parent="." unique_id=1309072378]
 transform = Transform3D(-0.9490624, 0.10367357, -0.2975442, 0.09095094, 0.9942609, 0.056329302, 0.30167648, 0.026398119, -0.9530449, 3.2034311, 2.3501616, 11.847433)
 script = ExtResource("6_7mycd")
+exit_speed_a = 11.0
+exit_speed_b = 12.5
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=1291387834]
+
+[node name="ColorRect" type="ColorRect" parent="CanvasLayer" unique_id=1212286297]
+material = SubResource("ShaderMaterial_272bh")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
