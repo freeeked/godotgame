@@ -5,8 +5,8 @@
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
 [ext_resource type="Script" uid="uid://mrqkgdga252i" path="res://scripts/button_gate.gd" id="5_lquwl"]
 [ext_resource type="Script" uid="uid://dh2wrwbih5w81" path="res://scripts/pneumatic_tube.gd" id="6_7mycd"]
-[ext_resource type="Shader" uid="uid://n2o7kespljyg" path="res://shaders/comic_pixel_filter.gdshader" id="7_272bh"]
 [ext_resource type="Script" uid="uid://8hryct2ausxj" path="res://scripts/turret_cannon.gd" id="7_trcan"]
+[ext_resource type="Script" uid="uid://oagt2jqfxb1l" path="res://scripts/clay_world_styler.gd" id="8_5vw27"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
 albedo_color = Color(0.24, 0.29, 0.37, 1)
@@ -31,17 +31,6 @@ roughness = 0.55
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gold"]
 albedo_color = Color(0.96, 0.78, 0.15, 1)
 roughness = 0.45
-
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_272bh"]
-shader = ExtResource("7_272bh")
-shader_parameter/enable_pixelation = true
-shader_parameter/pixel_size = 2.0
-shader_parameter/enable_outlines = true
-shader_parameter/outline_color = Color(0.06, 0.07, 0.11, 1)
-shader_parameter/outline_thickness = 1.25
-shader_parameter/edge_threshold = 0.2
-shader_parameter/color_posterize_steps = 0.0
-shader_parameter/scanline_strength = 0.06
 
 [node name="Main" type="Node3D" unique_id=276455839]
 script = ExtResource("1_0xm2m")
@@ -226,7 +215,7 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.7304277, -6.258487e-07, 0.68299, 0.5527568, 0.5873689, 0.5911494, -0.4011675, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.73042774, -7.152556e-07, 0.68299, 0.5527567, 0.5873689, 0.5911494, -0.40116766, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
 yaw_deg = 122.13558
 pitch_deg = 40.0
@@ -248,12 +237,16 @@ exit_speed_a = 11.0
 exit_speed_b = 12.5
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=1291387834]
+layer = 0
+visible = false
 
-[node name="ColorRect" type="ColorRect" parent="CanvasLayer" unique_id=1212286297]
-material = SubResource("ShaderMaterial_272bh")
+[node name="ColorRect" type="ColorRect" parent="CanvasLayer" unique_id=724050370]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
+
+[node name="Node" type="Node" parent="." unique_id=320649990]
+script = ExtResource("8_5vw27")
