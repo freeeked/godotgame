@@ -39,7 +39,6 @@ var _particles: Array[PuffInstance] = []
 var _puff_mesh: SphereMesh
 var _player_stack: PlayerStack
 
-# Auto-tracking state for footsteps and sharp direction reversals
 var _footstep_timer: float = 0.0
 var _prev_move_dir: Vector3 = Vector3.ZERO
 var _skid_cooldown: float = 0.0
@@ -48,14 +47,13 @@ func _ready() -> void:
 	_build_shared_mesh()
 
 func _build_shared_mesh() -> void:
-	# Low-segment SphereMesh produces crisp, chunky icosahedron-style facets in Godot 4
 	_puff_mesh = SphereMesh.new()
 	_puff_mesh.radius = puff_radius
 	_puff_mesh.height = puff_radius * 2.0
 	_puff_mesh.radial_segments = 6
 	_puff_mesh.rings = 3
 
-## Connects directly to PlayerStack signals so jumps, landings, bounces, and ejects emit automatically.
+## Connects directly to PlayerStack signals so jumps, long jumps, landings, bounces, and ejects emit automatically.
 func bind_to_player_stack(stack: PlayerStack) -> void:
 	if stack == null:
 		return
@@ -68,14 +66,14 @@ func bind_to_player_stack(stack: PlayerStack) -> void:
 		emit_burst(origin, count, col, 3.6 if is_air_combo else 3.0, 1.05 if is_air_combo else 0.9)
 	)
 
-	stack.side_somersaulted.connect(func(stack_count: int) -> void:
+	stack.long_jumped.connect(func(stack_count: int) -> void:
 		var origin: Vector3 = stack.get_leader_position() + Vector3(0.0, -0.45, 0.0)
-		emit_burst(origin, 10 + stack_count, Color("bae6fd"), 4.2, 1.15)
+		emit_burst(origin, 9 + stack_count, Color("bae6fd"), 4.0, 1.08)
 	)
 
 	stack.skid_started.connect(func(origin: Vector3, skid_dir: Vector3) -> void:
 		emit_skid_dust(origin, -skid_dir)
-		_skid_cooldown = 0.14
+		_skid_cooldown = 0.10
 	)
 
 	stack.landed.connect(func(impact_speed: float, stack_count: int) -> void:
@@ -115,7 +113,6 @@ func _update_stack_locomotion_dust(delta: float) -> void:
 	var horiz_speed: float = horiz_vel.length()
 	var feet_pos: Vector3 = leader.body.global_position - Vector3(0.0, leader.radius * 0.82, 0.0)
 
-	# 1. Wall bump / slide friction puffs when pushing against a wall
 	if leader.body.is_on_wall() and vel.length() > 3.5:
 		if _skid_cooldown <= 0.0:
 			var wall_n: Vector3 = leader.body.get_wall_normal()
@@ -130,14 +127,12 @@ func _update_stack_locomotion_dust(delta: float) -> void:
 
 	var move_dir: Vector3 = horiz_vel / horiz_speed
 
-	# 2. Sprint-only skid dust puffs while sliding
 	if _player_stack._is_skidding and _skid_cooldown <= 0.0:
 		emit_skid_dust(feet_pos, -move_dir)
-		_skid_cooldown = 0.10
+		_skid_cooldown = 0.07
 
 	_prev_move_dir = _prev_move_dir.lerp(move_dir, minf(1.0, 10.0 * delta)).normalized()
 
-	# 3. Periodic footstep / sprint-roll puffs
 	_footstep_timer -= delta
 	if _footstep_timer <= 0.0:
 		emit_footstep_dust(feet_pos, move_dir)
@@ -154,7 +149,6 @@ func spawn_particle(
 	if _puff_mesh == null:
 		_build_shared_mesh()
 
-	# Recycle oldest particle if we hit the cap
 	if _particles.size() >= max_active_particles:
 		var oldest: PuffInstance = _particles.pop_front()
 		if is_instance_valid(oldest.mesh_inst):
@@ -166,7 +160,6 @@ func spawn_particle(
 	mat.metallic = 0.0
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	# Flat-shaded faceted look via vertex/face normals unless clay style is toggled
 	if not use_clay_style:
 		mat.vertex_color_use_as_albedo = false
 
@@ -339,7 +332,6 @@ func update_particles(delta: float) -> void:
 		p.mesh_inst.position += p.velocity * delta
 		p.mesh_inst.rotation += p.rot_speed * delta
 
-		# Quick pop-in over first pop_in_ratio of life, then smooth shrink
 		var scale_curve: float
 		if t < pop_in_ratio:
 			scale_curve = 0.4 + (t / maxf(0.001, pop_in_ratio)) * 0.6
