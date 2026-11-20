@@ -48,6 +48,7 @@ var _camera_rig: Node3D
 var _camera: Camera3D
 var _hud: GameHUD
 var _sound: SoundEngine
+var _dust: DustParticles
 
 var _target_yaw: float = 0.0
 var _target_pitch: float = -0.16
@@ -76,6 +77,7 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_hud()
 	_setup_sound()
+	_setup_dust()
 
 	if player_stack != null:
 		player_stack.target_lock_changed.connect(func(_id: int, _blob_name: String, is_locked: bool) -> void:
@@ -99,6 +101,7 @@ func _ready() -> void:
 			_smoothed_boost_ratio = 0.0
 			_reset_level_contraptions()
 			_refresh_stack_hud()
+			_dust.clear_all()
 		)
 		_refresh_stack_hud()
 
@@ -227,6 +230,15 @@ func _setup_lighting_if_needed() -> void:
 		env.ambient_light_energy = 0.65
 		world_env.environment = env
 		add_child(world_env)
+
+func _setup_dust() -> void:
+	_dust = get_node_or_null("DustParticles") as DustParticles
+	if _dust == null:
+		_dust = DustParticles.new()
+		_dust.name = "DustParticles"
+		add_child(_dust)
+	if player_stack != null:
+		_dust.bind_to_player_stack(player_stack)
 
 func _setup_camera() -> void:
 	_camera = find_child("Camera3D", true, false) as Camera3D

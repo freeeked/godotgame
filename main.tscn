@@ -215,7 +215,7 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.73042774, -7.152556e-07, 0.68299, 0.5527567, 0.5873689, 0.5911494, -0.40116766, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.7304278, -8.3446486e-07, 0.68299, 0.5527567, 0.587369, 0.5911494, -0.4011678, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
 yaw_deg = 122.13558
 pitch_deg = 40.0
@@ -248,5 +248,6 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 
-[node name="Node" type="Node" parent="." unique_id=320649990]
+[node name="ClayWorldStyler" type="Node" parent="." unique_id=320649990]
 script = ExtResource("8_5vw27")
+enabled = false
