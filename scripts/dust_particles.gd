@@ -68,6 +68,16 @@ func bind_to_player_stack(stack: PlayerStack) -> void:
 		emit_burst(origin, count, col, 3.6 if is_air_combo else 3.0, 1.05 if is_air_combo else 0.9)
 	)
 
+	stack.side_somersaulted.connect(func(stack_count: int) -> void:
+		var origin: Vector3 = stack.get_leader_position() + Vector3(0.0, -0.45, 0.0)
+		emit_burst(origin, 10 + stack_count, Color("bae6fd"), 4.2, 1.15)
+	)
+
+	stack.skid_started.connect(func(origin: Vector3, skid_dir: Vector3) -> void:
+		emit_skid_dust(origin, -skid_dir)
+		_skid_cooldown = 0.14
+	)
+
 	stack.landed.connect(func(impact_speed: float, stack_count: int) -> void:
 		var intensity: float = clampf(impact_speed / 20.0, 0.4, 1.35)
 		var origin: Vector3 = stack.get_leader_position() + Vector3(0.0, -0.5, 0.0)
@@ -120,11 +130,10 @@ func _update_stack_locomotion_dust(delta: float) -> void:
 
 	var move_dir: Vector3 = horiz_vel / horiz_speed
 
-	# 2. Sharp direction reversal skid puffs
-	if _prev_move_dir.length_squared() > 0.5 and _skid_cooldown <= 0.0:
-		if move_dir.dot(_prev_move_dir) < skid_turn_dot_threshold and horiz_speed > 6.5:
-			emit_skid_dust(feet_pos, move_dir)
-			_skid_cooldown = 0.22
+	# 2. Sprint-only skid dust puffs while sliding
+	if _player_stack._is_skidding and _skid_cooldown <= 0.0:
+		emit_skid_dust(feet_pos, -move_dir)
+		_skid_cooldown = 0.10
 
 	_prev_move_dir = _prev_move_dir.lerp(move_dir, minf(1.0, 10.0 * delta)).normalized()
 

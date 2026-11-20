@@ -10,6 +10,8 @@ signal stack_respawned()
 signal target_lock_changed(blob_id: int, blob_name: String, is_locked: bool)
 signal stack_swap_completed(new_leader_id: int, new_leader_name: String)
 signal jumped(stack_count: int, is_air_combo: bool)
+signal side_somersaulted(stack_count: int)
+signal skid_started(origin: Vector3, skid_dir: Vector3)
 signal landed(impact_speed: float, stack_count: int)
 signal bounced(speed: float)
 
@@ -44,6 +46,22 @@ signal bounced(speed: float)
 @export var roll_spring_stiffness: float = 340.0
 ## Spring damping stabilizing trailing blobs during sprint-roll.
 @export var roll_spring_damping: float = 23.0
+
+@export_group("Sprint Skid & Side Somersault")
+## Minimum horizontal speed required during a sprint-roll to trigger a reversal skid.
+@export var skid_min_speed: float = 11.5
+## Dot-product threshold below which a sharp turn while sprint-rolling initiates a skid.
+@export var skid_dot_threshold: float = -0.35
+## Duration (seconds) of the skid window during which pressing Jump triggers a side somersault.
+@export var skid_window_duration: float = 0.30
+## Braking deceleration rate while skidding across the ground.
+@export var skid_brake_decel: float = 36.0
+## Vertical jump impulse multiplier for a sprint-skid side somersault.
+@export var side_somersault_jump_mult: float = 1.24
+## Fraction of pre-skid sprint momentum carried into the side somersault launch.
+@export var side_somersault_momentum_keep: float = 0.90
+## Minimum horizontal launch speed granted by a side somersault.
+@export var side_somersault_min_speed: float = 16.0
 
 @export_group("Eject & Roll Bottom")
 ## [Currently unused] Legacy standing top-eject horizontal speed.
@@ -160,6 +178,15 @@ var _roll_entry_timer: float = 0.0
 var _roll_exit_timer: float = 0.0
 var _launch_momentum_timer: float = 0.0
 var _elapsed: float = 0.0
+
+var _is_skidding: bool = false
+var _skid_timer: float = 0.0
+var _skid_dir: Vector3 = Vector3.ZERO
+var _skid_turn_dir: Vector3 = Vector3.ZERO
+var _pre_skid_speed: float = 0.0
+var _is_side_somersaulting: bool = false
+var _somersault_angle: float = 0.0
+var _somersault_side_sign: float = 1.0
 
 var camera_shake_offset: Vector3 = Vector3.ZERO
 var _camera_shake_vel: Vector3 = Vector3.ZERO
@@ -389,8 +416,18 @@ func _update_camera_shake(delta: float) -> void:
 		camera_shake_offset = Vector3.ZERO
 		_camera_shake_vel = Vector3.ZERO
 
+func _clear_skid_state() -> void:
+	_is_skidding = false
+	_skid_timer = 0.0
+	_skid_dir = Vector3.ZERO
+	_skid_turn_dir = Vector3.ZERO
+	_pre_skid_speed = 0.0
+
 func respawn(spawn_point: Vector3) -> void:
 	_cancel_stack_swoop()
+	_clear_skid_state()
+	_is_side_somersaulting = false
+	_somersault_angle = 0.0
 	_stack_swap_cooldown = 0.0
 	_set_highlighted_target(null)
 	_dead_nodes.clear()
@@ -534,9 +571,9 @@ func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> voi
 		respawn(Vector3.ZERO)
 		return
 
-	# Update facing_angle from current frame input BEFORE eject/roll actions
+	# Update facing_angle from current frame input BEFORE eject/roll actions (unless mid-skid)
 	var axes := _read_move_axes()
-	if _stack_swoop_target == null and (not is_zero_approx(axes.x) or not is_zero_approx(axes.y)):
+	if _stack_swoop_target == null and not _is_skidding and (not is_zero_approx(axes.x) or not is_zero_approx(axes.y)):
 		var sin_y := sin(camera_yaw)
 		var cos_y := cos(camera_yaw)
 		var world_x := cos_y * axes.x + (-sin_y) * (-axes.y)
@@ -684,6 +721,10 @@ func initiate_stack_swap_swoop() -> bool:
 		or target.is_recalling
 	):
 		return false
+
+	_clear_skid_state()
+	_is_side_somersaulting = false
+	_somersault_angle = 0.0
 
 	# Clamp runaway sprint-roll glide speed on lock-on
 	var target_horiz_spd := Vector2(target.velocity.x, target.velocity.z).length()
@@ -1713,7 +1754,23 @@ func _update_ejected_characters(delta: float) -> void:
 					_apply_squash(b, -0.2, 0.2)
 					bounced.emit(absf(rel_vel))
 
-# --- Active Stack Movement & Sprint-Roll ---
+# --- Active Stack Movement, Sprint-Roll, Sprint Skid & Side Somersault ---
+
+func _restore_blue_base_order() -> void:
+	var blue_idx := -1
+	for idx in range(_active_nodes.size()):
+		if _active_nodes[idx].id == 0:
+			blue_idx = idx
+			break
+	if blue_idx > 0:
+		var anchor_x := _active_nodes[0].body.global_position.x
+		var anchor_z := _active_nodes[0].body.global_position.z
+		var anchor_feet_y := _active_nodes[0].body.global_position.y - _active_nodes[0].radius * 0.92
+		var blue_node: StackBlob = _active_nodes[blue_idx]
+		_active_nodes.remove_at(blue_idx)
+		blue_node.body.global_position = Vector3(anchor_x, anchor_feet_y + blue_node.radius * 0.92, anchor_z)
+		_active_nodes.push_front(blue_node)
+		_sync_collider_states()
 
 func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> void:
 	var bottom := _active_nodes[0]
@@ -1738,7 +1795,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var sprint_held := _read_sprint_held()
 	var has_move_input := input_dir.length_squared() > 0.0
 	var forced_crouch := (not sprint_held) and _active_nodes.size() > 1 and not _can_stand_up()
-	var wants_sprint_roll := sprint_held or forced_crouch
+	var wants_sprint_roll := (sprint_held or forced_crouch) and not _is_side_somersaulting
 
 	if wants_sprint_roll and not _is_sprint_rolling:
 		_is_sprint_rolling = true
@@ -1761,29 +1818,15 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 
 	elif not wants_sprint_roll and _is_sprint_rolling:
 		_is_sprint_rolling = false
+		_clear_skid_state()
 		_roll_exit_timer = 0.12
 		_roll_entry_timer = 0.0
+		_restore_blue_base_order()
 
-		var blue_idx := -1
-		for idx in range(_active_nodes.size()):
-			if _active_nodes[idx].id == 0:
-				blue_idx = idx
-				break
-		if blue_idx > 0:
-			var anchor_x := _active_nodes[0].body.global_position.x
-			var anchor_z := _active_nodes[0].body.global_position.z
-			var anchor_feet_y := _active_nodes[0].body.global_position.y - _active_nodes[0].radius * 0.92
-			var blue_node: StackBlob = _active_nodes[blue_idx]
-			_active_nodes.remove_at(blue_idx)
-			blue_node.body.global_position = Vector3(anchor_x, anchor_feet_y + blue_node.radius * 0.92, anchor_z)
-			_active_nodes.push_front(blue_node)
-			_sync_collider_states()
-
+		# Keep sprint momentum when transitioning out of sprint-roll into a jump or run
 		var exit_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-		if exit_speed > move_speed and _launch_momentum_timer <= 0.0:
-			var carry_ratio := (move_speed * 1.1) / exit_speed
-			_leader_vel.x *= carry_ratio
-			_leader_vel.z *= carry_ratio
+		if exit_speed > move_speed:
+			_launch_momentum_timer = maxf(_launch_momentum_timer, 0.24 if _is_grounded else 0.42)
 
 		for idx in range(_active_nodes.size()):
 			_apply_squash(_active_nodes[idx], 0.24 - idx * 0.03, -0.22 + idx * 0.03)
@@ -1805,15 +1848,50 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	_update_stack_hull_collider()
 
 	if _is_grounded and _leader_vel.y <= 0.0:
-		_launch_momentum_timer = 0.0
-		_cannon_ballistic_lock = false
-		_cannon_air_steer_blend = 1.0
-	else:
+		if _launch_momentum_timer <= 0.0:
+			_cannon_ballistic_lock = false
+			_cannon_air_steer_blend = 1.0
+		if _is_side_somersaulting:
+			_is_side_somersaulting = false
+			_somersault_angle = 0.0
+	if not _is_grounded:
 		_launch_momentum_timer = maxf(0.0, _launch_momentum_timer - delta)
+	elif _launch_momentum_timer > 0.0:
+		# Smoothly decay preserved sprint-exit momentum on the ground instead of hard-clamping
+		_launch_momentum_timer = maxf(0.0, _launch_momentum_timer - delta * 1.35)
+
+	# --- Sprint-Only Turn-Around Skid Detection ---
+	var horiz_vel_vec := Vector3(_leader_vel.x, 0.0, _leader_vel.z)
+	var cur_horiz_speed := horiz_vel_vec.length()
+
+	if _is_sprint_rolling and _is_grounded and sprint_held and not _cannon_ballistic_lock:
+		if not _is_skidding:
+			if has_move_input and cur_horiz_speed >= skid_min_speed:
+				var vel_dir := horiz_vel_vec / cur_horiz_speed
+				if vel_dir.dot(input_dir) <= skid_dot_threshold:
+					_is_skidding = true
+					_skid_timer = skid_window_duration
+					_skid_dir = vel_dir
+					_skid_turn_dir = input_dir
+					_pre_skid_speed = cur_horiz_speed
+					_facing_angle = atan2(vel_dir.x, vel_dir.z)
+					var feet_origin := bottom.body.global_position - Vector3(0.0, bottom.radius * 0.85, 0.0)
+					skid_started.emit(feet_origin, vel_dir)
+					for idx in range(_active_nodes.size()):
+						_apply_squash(_active_nodes[idx], 0.26 - idx * 0.03, -0.24 + idx * 0.03)
+		else:
+			_skid_timer -= delta
+			if has_move_input:
+				_skid_turn_dir = input_dir
+			# End skid if window expires, player releases reversal input, or slide stops
+			if _skid_timer <= 0.0 or not has_move_input or _skid_dir.dot(input_dir) > 0.15 or cur_horiz_speed < 2.2:
+				_clear_skid_state()
+	elif _is_skidding:
+		_clear_skid_state()
 
 	var rolling_with_input := _is_sprint_rolling and has_move_input
 	var active_max_speed := sprint_roll_speed if rolling_with_input else move_speed
-	var effective_max_speed := maxf(active_max_speed, Vector2(_leader_vel.x, _leader_vel.z).length()) if _launch_momentum_timer > 0.0 else active_max_speed
+	var effective_max_speed := maxf(active_max_speed, cur_horiz_speed) if _launch_momentum_timer > 0.0 else active_max_speed
 	var accel := ground_accel if _is_grounded else air_accel
 	var friction := ground_friction if _is_grounded else air_friction
 
@@ -1826,26 +1904,33 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 			_leader_vel.z += input_dir.z * steer_accel * delta
 			if Vector2(_leader_vel.x, _leader_vel.z).length() > 0.5:
 				_facing_angle = _lerp_angle(_facing_angle, atan2(_leader_vel.x, _leader_vel.z), 6.0 * delta)
+	elif _is_skidding:
+		# Slide along _skid_dir while braking hard so momentum carries into the skid & side-somersault
+		var slide_speed := maxf(0.0, horiz_vel_vec.dot(_skid_dir) - skid_brake_decel * delta)
+		_leader_vel.x = _skid_dir.x * slide_speed
+		_leader_vel.z = _skid_dir.z * slide_speed
 	elif has_move_input:
 		_facing_angle = atan2(input_dir.x, input_dir.z)
-		var cur_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
-		if _launch_momentum_timer <= 0.0:
-			if _is_grounded:
-				var target_vx := input_dir.x * effective_max_speed
-				var target_vz := input_dir.z * effective_max_speed
-				var turn_rate := 22.0 if _is_sprint_rolling else 24.0
-				var turn_t := 1.0 - exp(-turn_rate * delta)
-				_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
-				_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
-			else:
-				var air_target := maxf(cur_speed, effective_max_speed * 0.96)
-				var target_vx := input_dir.x * air_target
-				var target_vz := input_dir.z * air_target
-				var air_turn_t := 1.0 - exp(-15.0 * delta)
-				_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
-				_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
-				_leader_vel.x += input_dir.x * accel * delta
-				_leader_vel.z += input_dir.z * accel * delta
+		if _is_grounded:
+			var target_speed := effective_max_speed
+			if _launch_momentum_timer > 0.0 and not _is_sprint_rolling:
+				target_speed = lerpf(move_speed, effective_max_speed, clampf(_launch_momentum_timer / 0.24, 0.0, 1.0))
+			var target_vx := input_dir.x * target_speed
+			var target_vz := input_dir.z * target_speed
+			var turn_rate := 20.0 if _is_sprint_rolling else 24.0
+			var turn_t := 1.0 - exp(-turn_rate * delta)
+			_leader_vel.x = lerpf(_leader_vel.x, target_vx, turn_t)
+			_leader_vel.z = lerpf(_leader_vel.z, target_vz, turn_t)
+		else:
+			var air_target := maxf(cur_horiz_speed, effective_max_speed * 0.96)
+			var target_vx := input_dir.x * air_target
+			var target_vz := input_dir.z * air_target
+			var air_turn_rate := 11.0 if _is_side_somersaulting else 15.0
+			var air_turn_t := 1.0 - exp(-air_turn_rate * delta)
+			_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
+			_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
+			_leader_vel.x += input_dir.x * accel * delta
+			_leader_vel.z += input_dir.z * accel * delta
 
 		var horiz_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
 		if horiz_speed > effective_max_speed:
@@ -1870,19 +1955,73 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 	var can_coyote_jump := _coyote_timer > 0.0 and not _is_grounded
 	var can_combo_air_jump := _has_air_combo_jump and not _is_grounded
 	if (_is_grounded or can_coyote_jump or can_combo_air_jump) and _jump_buffer_timer > 0.0:
-		var is_combo_air := can_combo_air_jump and not can_coyote_jump
-		if is_combo_air:
-			_has_air_combo_jump = false
-		_leader_vel.y = jump_force
-		_is_grounded = false
-		_coyote_timer = 0.0
-		_jump_buffer_timer = 0.0
-		jumped.emit(_active_nodes.size(), is_combo_air)
+		# Check if jumping out of a sprint-roll skid -> Side Somersault!
+		if _is_skidding and _is_sprint_rolling and _is_grounded:
+			var flip_dir := _skid_turn_dir if _skid_turn_dir.length_squared() > 0.01 else (-_skid_dir)
+			var cross_y := _skid_dir.x * flip_dir.z - _skid_dir.z * flip_dir.x
+			_somersault_side_sign = 1.0 if cross_y >= 0.0 else -1.0
 
-		for idx in range(_active_nodes.size()):
-			var b := _active_nodes[idx]
-			_apply_squash(b, -0.3 + idx * 0.02, 0.38 - idx * 0.03)
-			b.spring_vel.y = 18.0 + idx * 2.0
+			var launch_horiz_speed := clampf(
+				maxf(_pre_skid_speed * side_somersault_momentum_keep, side_somersault_min_speed),
+				side_somersault_min_speed,
+				sprint_roll_speed * 1.08
+			)
+
+			_clear_skid_state()
+			_is_sprint_rolling = false
+			_roll_blend = 0.0
+			_roll_entry_timer = 0.0
+			_roll_exit_timer = 0.0
+			_restore_blue_base_order()
+
+			_is_side_somersaulting = true
+			_somersault_angle = 0.0
+			_launch_momentum_timer = 0.55
+			_facing_angle = atan2(flip_dir.x, flip_dir.z)
+
+			_leader_vel = Vector3(
+				flip_dir.x * launch_horiz_speed,
+				jump_force * side_somersault_jump_mult,
+				flip_dir.z * launch_horiz_speed
+			)
+			_is_grounded = false
+			_coyote_timer = 0.0
+			_jump_buffer_timer = 0.0
+
+			# Stack blobs vertically along the jump launch so the whole stack somersaults together
+			var base_pos := _active_nodes[0].body.global_position
+			var current_y := base_pos.y + _active_nodes[0].radius * 0.92
+			for idx in range(1, _active_nodes.size()):
+				var b := _active_nodes[idx]
+				b.body.global_position = Vector3(base_pos.x, current_y + b.radius * 0.92, base_pos.z)
+				b.velocity = Vector3.ZERO
+				current_y += b.radius * 1.85
+
+			for idx in range(_active_nodes.size()):
+				var b := _active_nodes[idx]
+				b.pivot.rotation.y = _facing_angle
+				_apply_squash(b, -0.34 + idx * 0.02, 0.42 - idx * 0.03)
+				b.spring_vel.y = 24.0 + float(idx) * 2.5
+
+			trigger_camera_shake(Vector3(-flip_dir.x * 0.35, 0.22, -flip_dir.z * 0.35))
+			side_somersaulted.emit(_active_nodes.size())
+		else:
+			var is_combo_air := can_combo_air_jump and not can_coyote_jump
+			if is_combo_air:
+				_has_air_combo_jump = false
+			# Preserve current horizontal momentum into any normal jump
+			if cur_horiz_speed > move_speed:
+				_launch_momentum_timer = maxf(_launch_momentum_timer, 0.45)
+			_leader_vel.y = jump_force
+			_is_grounded = false
+			_coyote_timer = 0.0
+			_jump_buffer_timer = 0.0
+			jumped.emit(_active_nodes.size(), is_combo_air)
+
+			for idx in range(_active_nodes.size()):
+				var b := _active_nodes[idx]
+				_apply_squash(b, -0.3 + idx * 0.02, 0.38 - idx * 0.03)
+				b.spring_vel.y = 18.0 + idx * 2.0
 
 	var is_near_apex := absf(_leader_vel.y) < 3.5
 	var eff_gravity := gravity
@@ -1893,7 +2032,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 
 	_leader_vel.y = maxf(_leader_vel.y - eff_gravity * delta, -terminal_velocity)
 
-	if _leader_vel.y > 0.0 and not _jump_held and _launch_momentum_timer <= 0.0:
+	if _leader_vel.y > 0.0 and not _jump_held and _launch_momentum_timer <= 0.0 and not _is_side_somersaulting:
 		_leader_vel.y *= 0.4
 
 	var was_grounded := _is_grounded
@@ -1920,14 +2059,27 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 			b.spring_vel.z = randf_range(-4.0, 4.0) * intensity
 
 	var roll_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+	if _is_side_somersaulting:
+		# Smooth 360-degree side-flip rotation over the jump arc
+		_somersault_angle = minf(TAU, _somersault_angle + 9.2 * delta)
+	else:
+		_somersault_angle = 0.0
+
 	if _roll_blend > 0.05:
-		_roll_spin_angle += (roll_speed / maxf(0.4, bottom.radius)) * delta * _roll_blend
+		var spin_dir := -0.35 if _is_skidding else 1.0
+		_roll_spin_angle += (roll_speed / maxf(0.4, bottom.radius)) * delta * _roll_blend * spin_dir
 	else:
 		_roll_spin_angle = 0.0
 
 	bottom.pivot.rotation.y = _lerp_angle(bottom.pivot.rotation.y, _facing_angle, 22.0 * delta)
-	bottom.pivot.rotation.x = _lerp_angle(bottom.pivot.rotation.x, 0.0, 20.0 * delta)
-	bottom.visual_root.rotation.x = _roll_spin_angle * _roll_blend
+	bottom.pivot.rotation.x = _lerp_angle(bottom.pivot.rotation.x, -0.28 if _is_skidding else 0.0, 20.0 * delta)
+
+	if _is_side_somersaulting:
+		bottom.visual_root.rotation.x = 0.0
+		bottom.visual_root.rotation.z = _somersault_angle * _somersault_side_sign
+	else:
+		bottom.visual_root.rotation.x = _roll_spin_angle * _roll_blend
+		bottom.visual_root.rotation.z = _lerp_angle(bottom.visual_root.rotation.z, 0.0, 20.0 * delta)
 
 	_update_squash_springs(delta)
 
@@ -1983,8 +2135,14 @@ func _update_vertical_stack_followers(delta: float) -> void:
 
 		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, line_heading, 20.0 * delta)
 		curr.pivot.rotation.x = _lerp_angle(curr.pivot.rotation.x, 0.0, 20.0 * delta)
-		curr.visual_root.rotation.x = curr.velocity.z * 0.035
-		curr.visual_root.rotation.z = -curr.velocity.x * 0.035
+		if _is_side_somersaulting:
+			var phase_lag := float(i) * 0.22
+			var follower_flip := maxf(0.0, _somersault_angle - phase_lag)
+			curr.visual_root.rotation.x = 0.0
+			curr.visual_root.rotation.z = follower_flip * _somersault_side_sign
+		else:
+			curr.visual_root.rotation.x = curr.velocity.z * 0.035
+			curr.visual_root.rotation.z = -curr.velocity.x * 0.035
 
 func _sample_follower_feet_y(
 	pos_x: float,
@@ -2125,7 +2283,7 @@ func get_stack_statuses() -> Array[Dictionary]:
 	return out
 
 func is_high_speed_state() -> bool:
-	return _is_sprint_rolling or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25
+	return _is_sprint_rolling or _is_side_somersaulting or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25
 
 # --- Cannon & Contraption Helpers ---
 
@@ -2193,6 +2351,7 @@ func set_external_control(enabled: bool) -> void:
 	_is_externally_controlled = enabled
 	if enabled:
 		_cannon_ballistic_lock = false
+		_clear_skid_state()
 		_cancel_stack_swoop()
 
 func get_active_blob_positions() -> Array[Vector3]:
@@ -2258,7 +2417,7 @@ func launch_ejected_blob(body_node: Node3D, muzzle_pos: Vector3, launch_vel: Vec
 			return
 
 func get_speed_fov_ratio() -> float:
-	if _is_sprint_rolling or _stack_swoop_target != null:
+	if _is_sprint_rolling or _is_side_somersaulting or _stack_swoop_target != null:
 		return 1.0
 	var horiz_speed: float = Vector2(_leader_vel.x, _leader_vel.z).length()
 	# Smoothly ramps from 0 at normal run speed (12.5) to 1 at cannon/boost speed (28+)

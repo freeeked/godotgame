@@ -133,6 +133,14 @@ func _setup_sound() -> void:
 			var pitch := (1.16 if is_air_combo else 1.0) + float(3 - stack_count) * 0.06
 			_sound.play(&"jump", 0.9, pitch)
 		)
+		player_stack.side_somersaulted.connect(func(stack_count: int) -> void:
+			var pitch := 1.24 + float(3 - stack_count) * 0.06
+			_sound.play(&"jump", 1.0, pitch)
+			_sound.play(&"ui_slide", 0.6, 1.35)
+		)
+		player_stack.skid_started.connect(func(_origin: Vector3, _skid_dir: Vector3) -> void:
+			_sound.play(&"ui_slide", 0.72, 0.78)
+		)
 		player_stack.landed.connect(func(impact_speed: float, stack_count: int) -> void:
 			var vol := clampf(impact_speed / 18.0, 0.25, 1.0)
 			var pitch := 0.92 + float(3 - stack_count) * 0.07
