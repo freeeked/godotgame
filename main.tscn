@@ -215,7 +215,7 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.7304278, -8.3446486e-07, 0.68299, 0.5527567, 0.587369, 0.5911494, -0.4011678, 0.80931914, -0.42903018, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.7304278, -8.3446497e-07, 0.68299, 0.5527567, 0.5873691, 0.5911494, -0.4011678, 0.8093192, -0.42903018, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
 yaw_deg = 122.13558
 pitch_deg = 40.0

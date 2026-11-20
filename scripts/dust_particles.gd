@@ -66,10 +66,6 @@ func bind_to_player_stack(stack: PlayerStack) -> void:
 		emit_burst(origin, count, col, 3.6 if is_air_combo else 3.0, 1.05 if is_air_combo else 0.9)
 	)
 
-	stack.long_jumped.connect(func(stack_count: int) -> void:
-		var origin: Vector3 = stack.get_leader_position() + Vector3(0.0, -0.45, 0.0)
-		emit_burst(origin, 9 + stack_count, Color("bae6fd"), 4.0, 1.08)
-	)
 
 	stack.skid_started.connect(func(origin: Vector3, skid_dir: Vector3) -> void:
 		emit_skid_dust(origin, -skid_dir)

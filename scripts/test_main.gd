@@ -192,11 +192,6 @@ func _setup_sound() -> void:
 			var pitch := (1.16 if is_air_combo else 1.0) + float(3 - stack_count) * 0.06
 			_sound.play(&"jump", 0.9, pitch)
 		)
-		player_stack.long_jumped.connect(func(stack_count: int) -> void:
-			var pitch := 1.14 + float(3 - stack_count) * 0.06
-			_sound.play(&"jump", 0.98, pitch)
-			_sound.play(&"tube_shoot", 0.55, 1.25)
-		)
 		player_stack.skid_started.connect(func(_origin: Vector3, _skid_dir: Vector3) -> void:
 			_sound.play(&"ui_slide", 0.72, 0.78)
 		)

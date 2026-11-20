@@ -10,7 +10,6 @@ signal stack_respawned()
 signal target_lock_changed(blob_id: int, blob_name: String, is_locked: bool)
 signal stack_swap_completed(new_leader_id: int, new_leader_name: String)
 signal jumped(stack_count: int, is_air_combo: bool)
-signal long_jumped(stack_count: int)
 signal skid_started(origin: Vector3, skid_dir: Vector3)
 signal landed(impact_speed: float, stack_count: int)
 signal bounced(speed: float)
@@ -37,7 +36,7 @@ signal bounced(speed: float)
 ## Early jump input window (seconds) buffered right before touching the ground.
 @export var jump_buffer_time_max: float = 0.10
 
-@export_group("Sprint Roll & Long Jump")
+@export_group("Sprint Roll")
 ## Maximum horizontal speed while holding Shift to sprint-roll.
 @export var sprint_roll_speed: float = 19.5
 ## Distance multiplier between follower blobs when trailing in a sprint-roll chain.
@@ -50,12 +49,6 @@ signal bounced(speed: float)
 @export var high_speed_turn_rate: float = 6.2
 ## Maximum bank roll angle (radians) tilted into high-speed turns.
 @export var max_turn_bank_rad: float = 0.44
-## Vertical jump impulse multiplier for a sprint-roll Long Jump (flatter trajectory).
-@export var long_jump_vert_mult: float = 0.76
-## Horizontal speed multiplier applied when launching a sprint-roll Long Jump.
-@export var long_jump_speed_mult: float = 1.16
-## Maximum horizontal speed cap during a Long Jump.
-@export var long_jump_max_speed: float = 24.5
 
 @export_group("180 Skid & Drift")
 ## Fraction of current mode top speed required to initiate a reversal skid.
@@ -191,7 +184,6 @@ var _skid_timer: float = 0.0
 var _skid_dir: Vector3 = Vector3.ZERO
 var _pre_skid_speed: float = 0.0
 
-var _is_long_jumping: bool = false
 var _landing_carry_timer: float = 0.0
 var _preserved_carry_speed: float = 0.0
 
@@ -247,7 +239,6 @@ func _build_blobs() -> void:
 
 		var visual_root := Node3D.new()
 		visual_root.name = "VisualRoot"
-		# ZYX ensures Z roll banks cleanly around the horizontal axis even while X spins forward
 		visual_root.rotation_order = EULER_ORDER_ZYX
 		pivot.add_child(visual_root)
 
@@ -438,7 +429,6 @@ func _clear_skid_state() -> void:
 func respawn(spawn_point: Vector3) -> void:
 	_cancel_stack_swoop()
 	_clear_skid_state()
-	_is_long_jumping = false
 	_landing_carry_timer = 0.0
 	_preserved_carry_speed = 0.0
 	_turn_bank_angle = 0.0
@@ -754,7 +744,6 @@ func initiate_stack_swap_swoop() -> bool:
 		return false
 
 	_clear_skid_state()
-	_is_long_jumping = false
 	_midair_eject_hang_timer = 0.0
 
 	var target_horiz_spd := Vector2(target.velocity.x, target.velocity.z).length()
@@ -1796,7 +1785,7 @@ func _update_ejected_characters(delta: float) -> void:
 					_apply_squash(b, -0.2, 0.2)
 					bounced.emit(absf(rel_vel))
 
-# --- Active Stack Movement, Sprint-Roll, 180 Skid & Long Jump ---
+# --- Active Stack Movement, Sprint-Roll & 180 Skid ---
 
 func _restore_blue_base_order() -> void:
 	var blue_idx := -1
@@ -1904,7 +1893,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 	var cur_horiz_speed := horiz_vel_vec.length()
 	var mode_top_speed := sprint_roll_speed if _is_sprint_rolling else move_speed
 	var skid_threshold_speed := mode_top_speed * skid_speed_ratio_min
-	var reverse_dot_limit := cos(deg_to_rad(skid_reverse_angle_deg)) # ~ -0.5736 for 125 deg
+	var reverse_dot_limit := cos(deg_to_rad(skid_reverse_angle_deg))
 
 	if _is_grounded and not _cannon_ballistic_lock:
 		if not _is_skidding:
@@ -1948,7 +1937,6 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 			if Vector2(_leader_vel.x, _leader_vel.z).length() > 0.5:
 				_facing_angle = _lerp_angle(_facing_angle, atan2(_leader_vel.x, _leader_vel.z), 6.0 * delta)
 	elif _is_skidding:
-		# Slide along _skid_dir while decelerating smoothly
 		var slide_speed := maxf(0.0, horiz_vel_vec.dot(_skid_dir) - skid_brake_decel * delta)
 		_leader_vel.x = _skid_dir.x * slide_speed
 		_leader_vel.z = _skid_dir.z * slide_speed
@@ -1959,7 +1947,6 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 			var use_angular_steer := _is_sprint_rolling and cur_horiz_speed > move_speed * 0.92
 
 			if use_angular_steer:
-				# Speed-scaled turn radius: steer velocity angularly at sprint-roll speeds (19.5+)
 				var angular_rate := lerpf(15.5, high_speed_turn_rate, speed_over_walk)
 				var steered_vel := _rotate_horizontal_vector(horiz_vel_vec, input_dir, angular_rate * delta)
 				var target_spd := effective_max_speed
@@ -1969,13 +1956,11 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 				_leader_vel.z = move_heading.z * next_spd
 				_facing_angle = atan2(move_heading.x, move_heading.z)
 
-				# Bank into high-speed turns
 				var cur_yaw := atan2(move_heading.x, move_heading.z)
 				var desired_yaw := atan2(input_dir.x, input_dir.z)
 				var yaw_error := fposmod(desired_yaw - cur_yaw + PI, TAU) - PI
 				target_bank = clampf(-yaw_error * 0.95 * (0.45 + 0.55 * speed_over_walk), -max_turn_bank_rad, max_turn_bank_rad)
 			else:
-				# Low-speed turns stay crisp and immediate
 				_facing_angle = atan2(input_dir.x, input_dir.z)
 				var target_speed := effective_max_speed
 				var target_vx := input_dir.x * target_speed
@@ -1988,8 +1973,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 			var air_target := maxf(cur_horiz_speed, effective_max_speed * 0.96)
 			var target_vx := input_dir.x * air_target
 			var target_vz := input_dir.z * air_target
-			var air_turn_rate := 9.5 if _is_long_jumping else 15.0
-			var air_turn_t := 1.0 - exp(-air_turn_rate * delta)
+			var air_turn_t := 1.0 - exp(-15.0 * delta)
 			_leader_vel.x = lerpf(_leader_vel.x, target_vx, air_turn_t)
 			_leader_vel.z = lerpf(_leader_vel.z, target_vz, air_turn_t)
 			_leader_vel.x += input_dir.x * accel * delta
@@ -2012,7 +1996,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 
 	_turn_bank_angle = lerpf(_turn_bank_angle, target_bank, 1.0 - exp(-12.0 * delta))
 
-	# --- Jump & Sprint-Roll Long Jump ---
+	# --- Standard Jump (preserves sprint-roll horizontal speed without Long Jump) ---
 	var coyote_limit := coyote_time_max * 1.25 if _is_sprint_rolling else coyote_time_max
 	if _is_grounded:
 		_coyote_timer = coyote_limit
@@ -2024,56 +2008,21 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 	var can_combo_air_jump := _has_air_combo_jump and not _is_grounded
 	if (_is_grounded or can_coyote_jump or can_combo_air_jump) and _jump_buffer_timer > 0.0:
 		var is_combo_air := can_combo_air_jump and not can_coyote_jump
-		var can_long_jump := _is_sprint_rolling and (_is_grounded or can_coyote_jump) and not _is_skidding and cur_horiz_speed >= move_speed * 0.85
+		if is_combo_air:
+			_has_air_combo_jump = false
+		if cur_horiz_speed > move_speed:
+			_launch_momentum_timer = maxf(_launch_momentum_timer, 0.50)
+			_preserved_carry_speed = maxf(_preserved_carry_speed, cur_horiz_speed)
+		_leader_vel.y = jump_force
+		_is_grounded = false
+		_coyote_timer = 0.0
+		_jump_buffer_timer = 0.0
+		jumped.emit(_active_nodes.size(), is_combo_air)
 
-		if can_long_jump:
-			# Flatter, faster Long Jump that preserves horizontal carry into landing
-			var lj_dir := Vector3(_leader_vel.x, 0.0, _leader_vel.z)
-			if lj_dir.length_squared() < 0.01 and has_move_input:
-				lj_dir = input_dir
-			elif lj_dir.length_squared() >= 0.01:
-				lj_dir = lj_dir.normalized()
-			else:
-				lj_dir = Vector3(sin(_facing_angle), 0.0, cos(_facing_angle))
-
-			var lj_speed := clampf(
-				maxf(cur_horiz_speed * long_jump_speed_mult, sprint_roll_speed * 1.12),
-				sprint_roll_speed * 1.08,
-				long_jump_max_speed
-			)
-			_leader_vel.x = lj_dir.x * lj_speed
-			_leader_vel.z = lj_dir.z * lj_speed
-			_leader_vel.y = jump_force * long_jump_vert_mult
-			_facing_angle = atan2(lj_dir.x, lj_dir.z)
-
-			_is_long_jumping = true
-			_launch_momentum_timer = 0.65
-			_preserved_carry_speed = lj_speed
-			_is_grounded = false
-			_coyote_timer = 0.0
-			_jump_buffer_timer = 0.0
-			long_jumped.emit(_active_nodes.size())
-
-			for idx in range(_active_nodes.size()):
-				var b := _active_nodes[idx]
-				_apply_squash(b, -0.34 + idx * 0.02, 0.40 - idx * 0.03)
-				b.spring_vel.y = 20.0 + idx * 2.0
-		else:
-			if is_combo_air:
-				_has_air_combo_jump = false
-			if cur_horiz_speed > move_speed:
-				_launch_momentum_timer = maxf(_launch_momentum_timer, 0.45)
-			_leader_vel.y = jump_force
-			_is_long_jumping = false
-			_is_grounded = false
-			_coyote_timer = 0.0
-			_jump_buffer_timer = 0.0
-			jumped.emit(_active_nodes.size(), is_combo_air)
-
-			for idx in range(_active_nodes.size()):
-				var b := _active_nodes[idx]
-				_apply_squash(b, -0.3 + idx * 0.02, 0.38 - idx * 0.03)
-				b.spring_vel.y = 18.0 + idx * 2.0
+		for idx in range(_active_nodes.size()):
+			var b := _active_nodes[idx]
+			_apply_squash(b, -0.3 + idx * 0.02, 0.38 - idx * 0.03)
+			b.spring_vel.y = 18.0 + idx * 2.0
 
 	# Gravity & Midair Eject Hang-Time Forgiveness
 	var is_near_apex := absf(_leader_vel.y) < 3.5
@@ -2087,7 +2036,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 
 	_leader_vel.y = maxf(_leader_vel.y - eff_gravity * delta, -terminal_velocity)
 
-	if _leader_vel.y > 0.0 and not _jump_held and _launch_momentum_timer <= 0.0 and not _is_long_jumping and _midair_eject_hang_timer <= 0.0:
+	if _leader_vel.y > 0.0 and not _jump_held and _launch_momentum_timer <= 0.0 and _midair_eject_hang_timer <= 0.0:
 		_leader_vel.y *= 0.4
 
 	var was_grounded := _is_grounded
@@ -2103,14 +2052,10 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 		_leader_vel.y = bottom.body.velocity.y
 
 	if not was_grounded and _is_grounded:
-		if _is_long_jumping:
-			# Preserve horizontal carry on Long Jump landing instead of clamping back to move_speed
-			var land_horiz := Vector2(_leader_vel.x, _leader_vel.z).length()
-			if land_horiz > move_speed:
-				_landing_carry_timer = 0.45
-				_preserved_carry_speed = land_horiz
-				_launch_momentum_timer = maxf(_launch_momentum_timer, 0.25)
-			_is_long_jumping = false
+		var land_horiz := Vector2(_leader_vel.x, _leader_vel.z).length()
+		if land_horiz > move_speed:
+			_landing_carry_timer = 0.35
+			_preserved_carry_speed = land_horiz
 
 		if impact_speed > 3.0:
 			landed.emit(impact_speed, _active_nodes.size())
@@ -2153,7 +2098,6 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 	else:
 		_roll_spin_angle = 0.0
 
-	# Base blob leans back (-X) against the slide during a skid; leans forward slightly when accelerating
 	var base_pitch := -0.36 if _is_skidding else _forward_accel_tilt
 	bottom.pivot.rotation.y = _lerp_angle(bottom.pivot.rotation.y, _facing_angle, 22.0 * delta)
 	bottom.pivot.rotation.x = _lerp_angle(bottom.pivot.rotation.x, base_pitch, 20.0 * delta)
@@ -2202,7 +2146,6 @@ func _update_vertical_stack_followers(delta: float, stride_bob_y: float = 0.0, s
 		var v_stretch := clampf(_leader_vel.y * 0.012, -0.18, 0.22)
 		var target_y := below.body.global_position.y + spacing + v_stretch
 
-		# During a skid, upper stacked blobs pitch forward in the slide direction from inertia
 		var inertia_lead := skid_fwd * (0.34 * float(i)) if _is_skidding else Vector3.ZERO
 		var disp_x := (below.body.global_position.x + inertia_lead.x) - curr.body.global_position.x
 		var disp_z := (below.body.global_position.z + inertia_lead.z) - curr.body.global_position.z
@@ -2266,7 +2209,6 @@ func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roun
 		var ahead := _active_nodes[i - 1]
 		var curr := _active_nodes[i]
 
-		# Trail along each segment's actual tangent direction so curves whip smoothly instead of kinking
 		var seg_heading := ahead.pivot.rotation.y
 		var seg_back_x := -sin(seg_heading)
 		var seg_back_z := -cos(seg_heading)
@@ -2276,7 +2218,6 @@ func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roun
 		var target_z := ahead.body.global_position.z + seg_back_z * spacing
 
 		if _is_skidding:
-			# Upper blobs surge slightly forward along the slide from inertia
 			target_x += skid_fwd.x * (0.28 * float(i))
 			target_z += skid_fwd.z * (0.28 * float(i))
 
@@ -2313,7 +2254,6 @@ func _update_sprint_roll_followers(delta: float, speed_stretch: float, roll_roun
 		)
 		var target_y := surface_feet_y + curr.radius * 0.92
 		if _is_skidding:
-			# Slight upward pile-up from forward inertia during skid
 			target_y += 0.14 * float(i)
 		var y_follow_rate := 36.0 if _is_grounded else 26.0
 		curr.body.global_position.y = lerpf(
@@ -2378,7 +2318,7 @@ func get_stack_statuses() -> Array[Dictionary]:
 	return out
 
 func is_high_speed_state() -> bool:
-	return _is_sprint_rolling or _is_long_jumping or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25
+	return _is_sprint_rolling or _stack_swoop_target != null or Vector2(_leader_vel.x, _leader_vel.z).length() > move_speed * 1.25
 
 # --- Cannon & Contraption Helpers ---
 
@@ -2476,6 +2416,7 @@ func launch_stack_from_cannon(muzzle_pos: Vector3, launch_dir: Vector3, launch_v
 		var b: StackBlob = _active_nodes[i]
 		b.body.global_position = muzzle_pos + launch_dir * (float(i) * 0.85)
 		b.body.velocity = launch_vel
+		b.body.velocity = launch_vel
 		b.velocity = Vector3.ZERO
 		b.visual_root.scale = Vector3.ONE
 		b.pivot.rotation.y = _facing_angle
@@ -2512,7 +2453,7 @@ func launch_ejected_blob(body_node: Node3D, muzzle_pos: Vector3, launch_vel: Vec
 			return
 
 func get_speed_fov_ratio() -> float:
-	if _is_sprint_rolling or _is_long_jumping or _stack_swoop_target != null:
+	if _is_sprint_rolling or _stack_swoop_target != null:
 		return 1.0
 	var horiz_speed: float = Vector2(_leader_vel.x, _leader_vel.z).length()
 	return clampf((horiz_speed - move_speed) / 16.0, 0.0, 1.0)
