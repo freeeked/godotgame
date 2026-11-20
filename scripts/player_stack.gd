@@ -2089,7 +2089,63 @@ func is_high_speed_state() -> bool:
 
 # --- Cannon & Contraption Helpers ---
 
+func get_active_blob_radii() -> Array[float]:
+	var out: Array[float] = []
+	for b: StackBlob in _active_nodes:
+		out.append(b.radius)
+	return out
 
+func pose_stack_along_tube(world_positions: Array[Vector3], world_tangents: Array[Vector3], stretch: float = 0.16) -> void:
+	var count: int = mini(_active_nodes.size(), world_positions.size())
+	for i: int in range(count):
+		var b: StackBlob = _active_nodes[i]
+		b.body.global_position = world_positions[i]
+		b.body.velocity = Vector3.ZERO
+		b.velocity = Vector3.ZERO
+
+		var dir: Vector3 = world_tangents[i] if i < world_tangents.size() else Vector3.FORWARD
+		if dir.length_squared() > 0.0001:
+			dir = dir.normalized()
+			var horiz: Vector2 = Vector2(dir.x, dir.z)
+			if horiz.length() > 0.05:
+				var yaw: float = atan2(dir.x, dir.z)
+				if i == 0:
+					_facing_angle = yaw
+				b.pivot.rotation.y = yaw
+			var pitch: float = -asin(clampf(dir.y, -0.99, 0.99))
+			b.pivot.rotation.x = pitch
+			b.visual_root.rotation = Vector3.ZERO
+
+		b.squash = Vector3.ZERO
+		b.visual_root.scale = Vector3(
+			1.0 - stretch * 0.45,
+			1.0 - stretch * 0.45,
+			1.0 + stretch
+		)
+
+func launch_stack_from_tube(exit_pos: Vector3, launch_dir: Vector3, launch_vel: Vector3) -> void:
+	_is_externally_controlled = false
+	_cannon_ballistic_lock = true
+	_cannon_air_steer_blend = 0.0
+	_launch_momentum_timer = 0.55
+	_is_grounded = false
+	_coyote_timer = 0.0
+	_leader_vel = launch_vel
+
+	var clean_dir: Vector3 = launch_dir.normalized() if launch_dir.length_squared() > 0.0001 else Vector3(sin(_facing_angle), 0.0, cos(_facing_angle))
+	if Vector2(clean_dir.x, clean_dir.z).length() > 0.05:
+		_facing_angle = atan2(clean_dir.x, clean_dir.z)
+
+	for i: int in range(_active_nodes.size()):
+		var b: StackBlob = _active_nodes[i]
+		b.body.global_position = exit_pos - clean_dir * (float(i) * 0.72)
+		b.body.velocity = launch_vel
+		b.velocity = Vector3.ZERO
+		b.visual_root.scale = Vector3.ONE
+		b.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
+		b.visual_root.rotation = Vector3.ZERO
+		_apply_squash(b, -0.22 + float(i) * 0.02, 0.26 - float(i) * 0.02)
+		
 func is_externally_controlled() -> bool:
 	return _is_externally_controlled
 
