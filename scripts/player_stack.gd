@@ -179,6 +179,22 @@ signal footstep_triggered(foot_pos: Vector3, speed_ratio: float)
 ## Pre-impact squash applied right before catching a recalling blob.
 @export var catch_pre_squash: float = 0.065
 
+@export_group("Trenchcoat & Hat Prototype")
+## Enables the procedural trenchcoat, hat, and little limbs prototype.
+@export var enable_trenchcoat_prototype: bool = true
+## Main fabric color of the trenchcoat and hat.
+@export var coat_fabric_color: Color = Color("c2b87a")
+## Ribbon color around the hat crown.
+@export var hat_band_color: Color = Color("d48c8c")
+## Show little cartoon arms and walking feet peeking out of the coat.
+@export var show_cartoon_limbs: bool = true
+## Front opening angle (radians) of the trenchcoat so all three guys are visible inside.
+@export var coat_front_opening_rad: float = 1.65
+## Pop the hat off whenever any guy leaves the 3-blob stack (both E and C).
+@export var hat_pops_on_any_split: bool = true
+## Seconds that popped-off hat/coat props tumble before shrinking away.
+@export var popped_prop_lifetime: float = 1.6
+
 class StackBlob:
 	var id: int
 	var blob_name: String
@@ -268,8 +284,31 @@ var _is_externally_controlled: bool = false
 var _cannon_ballistic_lock: bool = false
 var _cannon_air_steer_blend: float = 1.0
 
+class CostumeProp:
+	var node: Node3D
+	var velocity: Vector3
+	var ang_vel: Vector3
+	var timer: float
+	var max_time: float
+
+var _coat_mesh_inst: MeshInstance3D = null
+var _coat_array_mesh: ArrayMesh = null
+var _coat_base_verts: PackedVector3Array = PackedVector3Array()
+var _coat_normals: PackedVector3Array = PackedVector3Array()
+var _coat_uvs: PackedVector2Array = PackedVector2Array()
+var _coat_indices: PackedInt32Array = PackedInt32Array()
+var _coat_ring_t: PackedFloat32Array = PackedFloat32Array()
+
+var _hat_root: Node3D = null
+var _blob_limbs: Dictionary = {} # StackBlob -> Dictionary of limb Node3Ds
+var _has_coat: bool = true
+var _has_hat: bool = true
+var _redress_pop_timer: float = 0.0
+var _popped_props: Array[CostumeProp] = []
+
 func _ready() -> void:
 	_build_blobs()
+	_build_costume_props()
 	respawn(Vector3.ZERO)
 
 func _build_blobs() -> void:
@@ -579,6 +618,7 @@ func respawn(spawn_point: Vector3) -> void:
 		current_y += blob.radius * 1.85
 
 	_sync_collider_states()
+	_reset_costume_state()
 	stack_respawned.emit()
 
 # --- Input Helpers ---
@@ -717,6 +757,7 @@ func step_stack(delta: float, camera_yaw: float, camera: Camera3D = null) -> voi
 	_update_ejected_characters(delta)
 	_update_highlight_visuals()
 	_update_camera_shake(delta)
+	_update_costume_visuals(delta)
 
 # --- Reticle Target Lock & Stack-Swap Swoop (F) ---
 
@@ -1147,6 +1188,8 @@ func _complete_stack_swap_docking(target_node: StackBlob) -> void:
 		current_feet_y += b.radius * 1.85
 
 	_sync_collider_states()
+	if _active_nodes.size() == _all_nodes.size():
+		_on_stack_reunited_costume()
 	trigger_camera_shake(Vector3(impact_horiz.x * 0.42, -0.28, impact_horiz.y * 0.42))
 	stack_swap_completed.emit(target_node.id, target_node.blob_name)
 
@@ -1348,6 +1391,7 @@ func eject_top_character() -> StackBlob:
 
 	_ejected_nodes.append(top_node)
 	_sync_collider_states()
+	_on_stack_split_costume(true, aim_dir)
 	blob_ejected.emit(top_node.id, top_node.blob_name, false)
 	return top_node
 
@@ -1485,6 +1529,7 @@ func roll_bottom_character() -> StackBlob:
 
 	_ejected_nodes.append(bottom_node)
 	_sync_collider_states()
+	_on_stack_split_costume(false, Vector3(forward_x, 0.35, forward_z))
 	blob_ejected.emit(bottom_node.id, bottom_node.blob_name, true)
 	return bottom_node
 
@@ -1662,6 +1707,8 @@ func _reabsorb_blob(ejected_index: int) -> void:
 		_leader_vel.z += impact_horiz.y * 1.4
 
 	_sync_collider_states()
+	if _active_nodes.size() == _all_nodes.size():
+		_on_stack_reunited_costume()
 	blob_reabsorbed.emit(blob.id, blob.blob_name, was_recalling)
 
 # --- Ejected Blob Physics, Homing Recall & Void Death ---
@@ -2716,3 +2763,366 @@ func get_speed_fov_ratio() -> float:
 		return 1.0
 	var horiz_speed: float = Vector2(_leader_vel.x, _leader_vel.z).length()
 	return clampf((horiz_speed - move_speed) / 16.0, 0.0, 1.0)
+
+
+# --- Trenchcoat, Hat & Limbs Prototype ---
+
+func _make_toon_mat(col: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = col
+	mat.roughness = 0.85
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+func _build_hat_mesh(parent: Node3D, coat_mat: StandardMaterial3D, band_mat: StandardMaterial3D) -> void:
+	# Brim (slightly upturned at edges so eyes below stay completely unobstructed)
+	var brim := MeshInstance3D.new()
+	var brim_mesh := CylinderMesh.new()
+	brim_mesh.top_radius = 0.96
+	brim_mesh.bottom_radius = 1.04
+	brim_mesh.height = 0.06
+	brim.mesh = brim_mesh
+	brim.material_override = coat_mat
+	parent.add_child(brim)
+
+	# Crown
+	var crown := MeshInstance3D.new()
+	var crown_mesh := CylinderMesh.new()
+	crown_mesh.top_radius = 0.52
+	crown_mesh.bottom_radius = 0.60
+	crown_mesh.height = 0.52
+	crown.mesh = crown_mesh
+	crown.position = Vector3(0.0, 0.27, 0.0)
+	crown.rotation.z = -0.04
+	crown.material_override = coat_mat
+	parent.add_child(crown)
+
+	# Ribbon band
+	var band := MeshInstance3D.new()
+	var band_mesh := CylinderMesh.new()
+	band_mesh.top_radius = 0.595
+	band_mesh.bottom_radius = 0.61
+	band_mesh.height = 0.10
+	band.mesh = band_mesh
+	band.position = Vector3(0.0, 0.08, 0.0)
+	band.material_override = band_mat
+	parent.add_child(band)
+
+func _build_open_coat_mesh(coat_mat: StandardMaterial3D) -> void:
+	_coat_mesh_inst = MeshInstance3D.new()
+	_coat_mesh_inst.name = "TrenchcoatMesh"
+	_coat_mesh_inst.material_override = coat_mat
+	add_child(_coat_mesh_inst)
+
+	# Single continuous C-shaped shell open in front (+Z) from hem (t=0) to collar (t=1)
+	var radial_segs := 22
+	var height_rings := 8
+	var half_open := clampf(coat_front_opening_rad * 0.5, 0.25, 1.35)
+	var arc_span := TAU - half_open * 2.0
+
+	_coat_base_verts.clear()
+	_coat_normals.clear()
+	_coat_uvs.clear()
+	_coat_indices.clear()
+	_coat_ring_t.clear()
+
+	for r in range(height_rings + 1):
+		var t := float(r) / float(height_rings) # 0 = bottom hem, 0.5 = waist, 1.0 = collar
+		# Slight flare at bottom hem, cinched waist, flared collar lapels at top
+		var waist_pinch := 1.0 - sin(t * PI) * 0.08
+		var hem_flare := (1.0 - t) * 0.14
+		var collar_flare := maxf(0.0, (t - 0.82) / 0.18) * 0.12
+		var radius := (0.86 * waist_pinch) + hem_flare + collar_flare
+
+		for s in range(radial_segs + 1):
+			var u := float(s) / float(radial_segs)
+			# Start at +half_open (left front lapel), wrap around back (-Z), end at -half_open (right front lapel)
+			var theta := half_open + u * arc_span
+			# Fold front edges slightly outward at top to form lapels
+			var edge_dist := minf(u, 1.0 - u)
+			var lapel_fold := 0.0
+			if t > 0.78 and edge_dist < 0.12:
+				lapel_fold = ((0.12 - edge_dist) / 0.12) * ((t - 0.78) / 0.22) * 0.16
+
+			var r_final := radius + lapel_fold
+			var x := sin(theta) * r_final
+			var z := cos(theta) * r_final * 0.94
+			var normal := Vector3(sin(theta), 0.0, cos(theta)).normalized()
+
+			_coat_base_verts.append(Vector3(x, t, z))
+			_coat_normals.append(normal)
+			_coat_uvs.append(Vector2(u, t))
+			_coat_ring_t.append(t)
+
+	var stride := radial_segs + 1
+	for r in range(height_rings):
+		for s in range(radial_segs):
+			var i0 := r * stride + s
+			var i1 := i0 + 1
+			var i2 := (r + 1) * stride + s
+			var i3 := i2 + 1
+			_coat_indices.append(i0)
+			_coat_indices.append(i2)
+			_coat_indices.append(i1)
+			_coat_indices.append(i1)
+			_coat_indices.append(i2)
+			_coat_indices.append(i3)
+
+	_coat_array_mesh = ArrayMesh.new()
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = _coat_base_verts
+	arrays[Mesh.ARRAY_NORMAL] = _coat_normals
+	arrays[Mesh.ARRAY_TEX_UV] = _coat_uvs
+	arrays[Mesh.ARRAY_INDEX] = _coat_indices
+	_coat_array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	_coat_mesh_inst.mesh = _coat_array_mesh
+
+func _build_costume_props() -> void:
+	if not enable_trenchcoat_prototype:
+		return
+
+	var coat_mat := _make_toon_mat(coat_fabric_color)
+	var band_mat := _make_toon_mat(hat_band_color)
+	var limb_mat := _make_toon_mat(Color("111827"))
+
+	_build_open_coat_mesh(coat_mat)
+
+	_hat_root = Node3D.new()
+	_hat_root.name = "TopHatRoot"
+	add_child(_hat_root)
+	_build_hat_mesh(_hat_root, coat_mat, band_mat)
+
+	# Build little arms & feet attached to each blob's FacingPivot
+	for b in _all_nodes:
+		var limb_data := {"arms": [], "legs": []}
+		var arm_mesh := CapsuleMesh.new()
+		arm_mesh.radius = 0.048
+		arm_mesh.height = b.radius * 0.78
+
+		var hand_mesh := SphereMesh.new()
+		hand_mesh.radius = 0.075
+		hand_mesh.height = 0.15
+
+		for side in [-1.0, 1.0]:
+			var arm_pivot := Node3D.new()
+			# Positioned outside the coat sides so arms visibly poke out
+			arm_pivot.position = Vector3(side * (b.radius + 0.16), 0.02, 0.08)
+			arm_pivot.rotation.z = -side * 1.15
+			b.pivot.add_child(arm_pivot)
+
+			var arm_mi := MeshInstance3D.new()
+			arm_mi.mesh = arm_mesh
+			arm_mi.material_override = limb_mat
+			arm_mi.position = Vector3(0.0, -b.radius * 0.32, 0.0)
+			arm_pivot.add_child(arm_mi)
+
+			var hand_mi := MeshInstance3D.new()
+			hand_mi.mesh = hand_mesh
+			hand_mi.material_override = limb_mat
+			hand_mi.position = Vector3(0.0, -b.radius * 0.68, 0.0)
+			arm_pivot.add_child(hand_mi)
+
+			limb_data["arms"].append(arm_pivot)
+
+		var leg_mesh := CapsuleMesh.new()
+		leg_mesh.radius = 0.052
+		leg_mesh.height = b.radius * 0.68
+
+		var foot_mesh := BoxMesh.new()
+		foot_mesh.size = Vector3(0.16, 0.08, 0.30)
+
+		for side in [-1.0, 1.0]:
+			var leg_pivot := Node3D.new()
+			leg_pivot.position = Vector3(side * b.radius * 0.36, -b.radius * 0.74, 0.02)
+			b.pivot.add_child(leg_pivot)
+
+			var leg_mi := MeshInstance3D.new()
+			leg_mi.mesh = leg_mesh
+			leg_mi.material_override = limb_mat
+			leg_mi.position = Vector3(0.0, -b.radius * 0.28, 0.0)
+			leg_pivot.add_child(leg_mi)
+
+			var foot_mi := MeshInstance3D.new()
+			foot_mi.mesh = foot_mesh
+			foot_mi.material_override = limb_mat
+			foot_mi.position = Vector3(0.0, -b.radius * 0.58, 0.09)
+			leg_pivot.add_child(foot_mi)
+
+			limb_data["legs"].append(leg_pivot)
+
+		_blob_limbs[b] = limb_data
+
+func _reset_costume_state() -> void:
+	for p in _popped_props:
+		if is_instance_valid(p.node):
+			p.node.queue_free()
+	_popped_props.clear()
+	_has_coat = true
+	_has_hat = true
+	_redress_pop_timer = 0.0
+
+func _spawn_popped_prop(source_node: Node3D, launch_vel: Vector3) -> void:
+	if source_node == null or not source_node.visible:
+		return
+	var clone := source_node.duplicate() as Node3D
+	add_child(clone)
+	clone.global_transform = source_node.global_transform
+	clone.scale = Vector3.ONE
+
+	var prop := CostumeProp.new()
+	prop.node = clone
+	prop.velocity = launch_vel
+	prop.ang_vel = Vector3(randf_range(-8.0, 8.0), randf_range(-6.0, 6.0), randf_range(-8.0, 8.0))
+	prop.timer = popped_prop_lifetime
+	prop.max_time = popped_prop_lifetime
+	_popped_props.append(prop)
+
+func _on_stack_split_costume(is_top_eject: bool, launch_dir: Vector3) -> void:
+	if not enable_trenchcoat_prototype:
+		return
+
+	if _has_coat and _coat_mesh_inst != null:
+		var coat_vel := Vector3(-launch_dir.x * 5.5, 9.5, -launch_dir.z * 5.5) + _leader_vel * 0.35
+		_spawn_popped_prop(_coat_mesh_inst, coat_vel)
+		_has_coat = false
+		_coat_mesh_inst.visible = false
+
+	if (is_top_eject or hat_pops_on_any_split) and _has_hat and _hat_root != null:
+		var hat_vel := Vector3(launch_dir.x * 7.5, 13.0, launch_dir.z * 7.5) + _leader_vel * 0.4
+		_spawn_popped_prop(_hat_root, hat_vel)
+		_has_hat = false
+		_hat_root.visible = false
+
+func _on_stack_reunited_costume() -> void:
+	if not enable_trenchcoat_prototype:
+		return
+	var changed := (not _has_coat) or (not _has_hat)
+	_has_coat = true
+	_has_hat = true
+	if changed:
+		_redress_pop_timer = 0.22
+
+func _update_deformed_coat_mesh(pop_bounce: float) -> void:
+	var bottom := _active_nodes[0]
+	var mid := _active_nodes[1]
+	var top := _active_nodes[2]
+
+	# Anchor coat at stack center so vertices stay local and clean
+	var coat_origin := mid.body.global_position
+	_coat_mesh_inst.global_position = coat_origin
+	_coat_mesh_inst.global_rotation = Vector3.ZERO
+	_coat_mesh_inst.scale = Vector3.ONE
+
+	var hem_pos := (bottom.body.global_position - Vector3(0.0, bottom.radius * 0.48, 0.0)) - coat_origin
+	var waist_pos := mid.body.global_position - coat_origin
+	var collar_pos := (top.body.global_position + Vector3(0.0, top.radius * 0.36, 0.0)) - coat_origin
+
+	var bot_basis := Basis(Vector3.UP, bottom.pivot.rotation.y) * Basis(Vector3.RIGHT, bottom.pivot.rotation.x * 0.65)
+	var mid_basis := Basis(Vector3.UP, mid.pivot.rotation.y) * Basis(Vector3.RIGHT, mid.pivot.rotation.x * 0.70)
+	var top_basis := Basis(Vector3.UP, top.pivot.rotation.y) * Basis(Vector3.RIGHT, top.pivot.rotation.x * 0.75)
+
+	var squash_r := (1.0 - _roll_blend + pop_bounce)
+	var verts := PackedVector3Array()
+	verts.resize(_coat_base_verts.size())
+
+	for idx in range(_coat_base_verts.size()):
+		var bv := _coat_base_verts[idx]
+		var t := _coat_ring_t[idx]
+		var radial := Vector3(bv.x, 0.0, bv.z) * squash_r
+
+		var spine_pos: Vector3
+		var ring_basis: Basis
+		if t < 0.5:
+			var u := t * 2.0
+			spine_pos = hem_pos.lerp(waist_pos, u)
+			ring_basis = bot_basis.slerp(mid_basis, u)
+		else:
+			var u := (t - 0.5) * 2.0
+			spine_pos = waist_pos.lerp(collar_pos, u)
+			ring_basis = mid_basis.slerp(top_basis, u)
+
+		verts[idx] = spine_pos + ring_basis * radial
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = _coat_normals
+	arrays[Mesh.ARRAY_TEX_UV] = _coat_uvs
+	arrays[Mesh.ARRAY_INDEX] = _coat_indices
+
+	_coat_array_mesh.clear_surfaces()
+	_coat_array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+func _update_costume_visuals(delta: float) -> void:
+	# Update tumbling popped-off hat / coat props
+	for i in range(_popped_props.size() - 1, -1, -1):
+		var p := _popped_props[i]
+		p.timer -= delta
+		if p.timer <= 0.0 or not is_instance_valid(p.node):
+			if is_instance_valid(p.node):
+				p.node.queue_free()
+			_popped_props.remove_at(i)
+			continue
+		p.velocity.y -= gravity * 0.85 * delta
+		p.node.global_position += p.velocity * delta
+		p.node.rotation += p.ang_vel * delta
+		var life_ratio := clampf(p.timer / maxf(0.01, p.max_time), 0.0, 1.0)
+		if life_ratio < 0.3:
+			p.node.scale = Vector3.ONE * (life_ratio / 0.3)
+
+	if not enable_trenchcoat_prototype or _coat_mesh_inst == null or _hat_root == null:
+		return
+
+	_redress_pop_timer = maxf(0.0, _redress_pop_timer - delta)
+	var pop_bounce := sin((1.0 - _redress_pop_timer / 0.22) * PI) * 0.22 if _redress_pop_timer > 0.0 else 0.0
+
+	var stack_count := _active_nodes.size()
+	var is_standing_full := (stack_count == _all_nodes.size()) and (_roll_blend < 0.45) and (_stack_swoop_target == null)
+
+	# 1. Single seamless open-front trenchcoat deformed across all 3 guys
+	_coat_mesh_inst.visible = _has_coat and is_standing_full
+	if _coat_mesh_inst.visible:
+		_update_deformed_coat_mesh(pop_bounce)
+
+	# 2. Hat perched cleanly above the top guy's eyes
+	_hat_root.visible = _has_hat and stack_count >= 2 and (_roll_blend < 0.55)
+	if _hat_root.visible:
+		var top_blob := _active_nodes[stack_count - 1]
+		var head_offset := Vector3(0.0, top_blob.radius * top_blob.visual_root.scale.y * 0.98, -0.04)
+		_hat_root.global_position = top_blob.body.global_position + top_blob.pivot.global_transform.basis * head_offset
+		_hat_root.global_rotation = top_blob.pivot.global_rotation
+		_hat_root.rotate_object_local(Vector3.RIGHT, -0.10) # Slight jaunty tilt back so eyes stay clear
+		_hat_root.rotate_object_local(Vector3.FORWARD, top_blob.visual_root.rotation.z * 0.8)
+		_hat_root.scale = Vector3.ONE * (top_blob.radius / 0.62) * (1.0 + pop_bounce)
+
+	# 3. Animate little arms & feet
+	var walk_speed := Vector2(_leader_vel.x, _leader_vel.z).length()
+	var walk_amt := clampf(walk_speed / move_speed, 0.0, 1.2) if (_is_grounded and not _is_sprint_rolling) else 0.0
+
+	for b in _all_nodes:
+		if not _blob_limbs.has(b):
+			continue
+		var limbs: Dictionary = _blob_limbs[b]
+		var active_idx := _active_nodes.find(b)
+		var is_tucked := _is_sprint_rolling or b.is_rolling or b.is_recalling or _dead_nodes.has(b)
+		var show_limbs := show_cartoon_limbs and not is_tucked
+
+		var arms: Array = limbs["arms"]
+		for side_i in range(arms.size()):
+			var arm: Node3D = arms[side_i]
+			arm.visible = show_limbs
+			if show_limbs:
+				var side_sign := -1.0 if side_i == 0 else 1.0
+				var wave := sin(_stride_phase + side_sign * 1.2 + float(b.id)) * 0.45 * walk_amt
+				var flail := sin(_elapsed * 18.0 + float(b.id)) * 0.35 if (active_idx == -1 and not b.is_grounded) else 0.0
+				arm.rotation.x = wave + flail
+
+		var legs: Array = limbs["legs"]
+		var show_legs := show_limbs and (active_idx == 0 or (active_idx == -1 and b.is_grounded))
+		for side_i in range(legs.size()):
+			var leg: Node3D = legs[side_i]
+			leg.visible = show_legs
+			if show_legs:
+				var phase_shift := 0.0 if side_i == 0 else PI
+				leg.rotation.x = sin(_stride_phase + phase_shift) * 0.75 * walk_amt
