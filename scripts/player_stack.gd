@@ -1,3 +1,4 @@
+## Manages the 3-blob player stack, sprint-rolling, eject/bowl launches, homing recall, and stack-swap swoops.
 extends Node3D
 class_name PlayerStack
 
@@ -13,53 +14,91 @@ signal landed(impact_speed: float, stack_count: int)
 signal bounced(speed: float)
 
 @export_group("Movement & Jump")
+## Maximum horizontal running speed while standing upright.
 @export var move_speed: float = 12.5
+## Horizontal acceleration rate while grounded.
 @export var ground_accel: float = 180.0
+## Horizontal steering acceleration while airborne.
 @export var air_accel: float = 85.0
+## Deceleration damping applied when releasing movement keys on the ground.
 @export var ground_friction: float = 28.0
+## Air drag applied when releasing movement keys midair.
 @export var air_friction: float = 2.5
+## Upward velocity impulse applied on jump takeoff.
 @export var jump_force: float = 17.5
+## Base downward gravity acceleration (halved near jump apex, 1.5x while falling).
 @export var gravity: float = 44.0
+## Maximum downward falling speed cap.
 @export var terminal_velocity: float = 32.0
+## Grace period (seconds) after walking off a ledge during which you can still jump.
 @export var coyote_time_max: float = 0.14
+## Early jump input window (seconds) buffered right before touching the ground.
 @export var jump_buffer_time_max: float = 0.10
 
 @export_group("Sprint Roll")
+## Maximum horizontal speed while holding Shift to sprint-roll.
 @export var sprint_roll_speed: float = 19.5
+## Distance multiplier between follower blobs when trailing in a sprint-roll chain.
 @export var roll_spacing_factor: float = 0.72
+## Spring stiffness pulling trailing blobs behind the leader during sprint-roll.
 @export var roll_spring_stiffness: float = 340.0
+## Spring damping stabilizing trailing blobs during sprint-roll.
 @export var roll_spring_damping: float = 23.0
 
 @export_group("Eject & Roll Bottom")
+## [Currently unused] Legacy standing top-eject horizontal speed.
 @export var throw_forward_speed: float = 16.0
+## [Currently unused] Legacy standing top-eject upward arc speed.
 @export var throw_upward_speed: float = 14.0
+## [Currently unused] Legacy sprint-roll top-eject horizontal speed.
 @export var sprint_throw_forward_speed: float = 31.0
+## [Currently unused] Legacy sprint-roll top-eject upward arc speed.
 @export var sprint_throw_upward_speed: float = 16.5
+## Forward bowling speed when launching the bottom blob (C / Ctrl) while standing.
 @export var roll_forward_speed: float = 30.0
+## Forward bowling speed when launching the bottom blob (C / Ctrl) while sprint-rolling.
 @export var sprint_roll_forward_speed: float = 48.0
+## Upward velocity added when bowling the bottom blob while airborne.
 @export var roll_upward_hop: float = 0.0
+## Bounciness multiplier (0–1) when ejected blobs hit floors or walls.
 @export var bounce_restitution: float = 0.45
 
 @export_group("Homing Recall (R)")
+## Minimum homing speed of blobs flying back to the stack on Recall (R).
 @export var recall_base_speed: float = 28.0
+## Extra speed added above the stack's current speed so recalling blobs always catch up.
 @export var recall_closing_margin: float = 24.0
+## Hard speed cap for recalling blobs and stack-swap swoops.
 @export var recall_max_speed: float = 58.0
+## Spring pull strength guiding homing blobs into their curved swoop arc.
 @export var recall_spring_stiffness: float = 165.0
+## Velocity damping on homing blobs to prevent overshooting the stack.
 @export var recall_spring_damping: float = 17.0
+## Initial upward pop velocity when Recall (R) or Stack-Swap Swoop (F) begins.
 @export var recall_initial_pop: float = 12.5
 
 @export_group("Stack Swap Swoop (F)")
+## Maximum distance (meters) at which the reticle can lock onto an ejected blob.
 @export var max_target_distance: float = 48.0
+## Normalized screen-center radius (0–1) within which an ejected blob gets targeted.
 @export var max_reticle_radius: float = 0.48
+## Cooldown (seconds) between Stack-Swap Swoops (F) to prevent accidental double-triggers.
 @export var stack_swap_cooldown_duration: float = 0.25
+## Maximum horizontal speed an ejected blob is clamped to when locked onto for a swoop.
 @export var swoop_target_glide_cap: float = 8.5
+## Upward pop velocity granted when docking onto a midair blob via Stack-Swap Swoop.
 @export var post_swoop_air_pop: float = 11.5
 
 @export_group("Stack & Springs")
+## Horizontal spring stiffness keeping stacked upper blobs aligned over the base blob.
 @export var follower_spring_stiffness: float = 260.0
+## Horizontal spring damping controlling upper-blob sway while stacked.
 @export var follower_spring_damping: float = 17.0
+## Elasticity stiffness for blob squash-and-stretch visual deformations.
 @export var squash_spring_stiffness: float = 165.0
+## Damping rate for blob squash-and-stretch jiggle settle time.
 @export var squash_spring_damping: float = 12.5
+## World Y-coordinate threshold below which blobs die or trigger a stack respawn.
 @export var void_death_y: float = -12.0
 
 class StackBlob:
@@ -1906,6 +1945,7 @@ func _update_active_stack(delta: float, axes: Vector2, camera_yaw: float) -> voi
 		_update_sprint_roll_followers(delta, speed_stretch, roll_roundness)
 	else:
 		_update_vertical_stack_followers(delta)
+
 func _update_vertical_stack_followers(delta: float) -> void:
 	var line_heading := _active_nodes[0].pivot.rotation.y
 	for i in range(1, _active_nodes.size()):
@@ -2145,7 +2185,7 @@ func launch_stack_from_tube(exit_pos: Vector3, launch_dir: Vector3, launch_vel: 
 		b.pivot.rotation = Vector3(0.0, _facing_angle, 0.0)
 		b.visual_root.rotation = Vector3.ZERO
 		_apply_squash(b, -0.22 + float(i) * 0.02, 0.26 - float(i) * 0.02)
-		
+
 func is_externally_controlled() -> bool:
 	return _is_externally_controlled
 
