@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://8wi1qs1f6e50" path="res://scripts/test_main.gd" id="1_0xm2m"]
 [ext_resource type="Script" uid="uid://dhtrm6jnaexc7" path="res://scripts/player_stack.gd" id="1_ig7tw"]
+[ext_resource type="PackedScene" uid="uid://cuo8o3ufpyxic" path="res://assets/models/Clay Test.glb" id="3_5vw27"]
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
 [ext_resource type="Script" uid="uid://mrqkgdga252i" path="res://scripts/button_gate.gd" id="5_lquwl"]
 [ext_resource type="Script" uid="uid://dh2wrwbih5w81" path="res://scripts/pneumatic_tube.gd" id="6_7mycd"]
@@ -45,6 +46,7 @@ transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 5, 11)
 
 [node name="PlayerStack" type="Node3D" parent="." unique_id=390215416]
 script = ExtResource("1_ig7tw")
+blob_model_scene = ExtResource("3_5vw27")
 
 [node name="TestGym" type="Node3D" parent="." unique_id=469026538]
 
@@ -215,7 +217,7 @@ material = SubResource("StandardMaterial3D_gold")
 script = ExtResource("3_h2yge")
 
 [node name="TurretCannon" type="Node3D" parent="." unique_id=1764826004]
-transform = Transform3D(-0.7304278, -8.3446497e-07, 0.68299, 0.5527567, 0.5873691, 0.5911494, -0.4011678, 0.8093192, -0.42903018, -17.51033, 1.3318038, -4.626129)
+transform = Transform3D(-0.7304278, -8.34465e-07, 0.68299, 0.5527567, 0.58736914, 0.5911494, -0.4011678, 0.80931926, -0.42903018, -17.51033, 1.3318038, -4.626129)
 script = ExtResource("7_trcan")
 yaw_deg = 122.13558
 pitch_deg = 40.0

@@ -14,6 +14,14 @@ signal skid_started(origin: Vector3, skid_dir: Vector3)
 signal landed(impact_speed: float, stack_count: int)
 signal bounced(speed: float)
 
+@export_group("Visuals")
+## Optional .glb / PackedScene to replace the default procedural sphere mesh.
+@export var blob_model_scene: PackedScene
+## Native radius (in meters) of the custom .glb model so it scales accurately to each blob's radius.
+@export var blob_model_native_radius: float = 1.0
+## Whether to tint the custom .glb model's materials with each blob's color (Blue, Green, Pink).
+@export var tint_custom_blob_model: bool = true
+
 @export_group("Movement & Jump")
 ## Maximum horizontal running speed while standing upright.
 @export var move_speed: float = 12.5
@@ -242,21 +250,44 @@ func _build_blobs() -> void:
 		visual_root.rotation_order = EULER_ORDER_ZYX
 		pivot.add_child(visual_root)
 
-		var mesh_inst := MeshInstance3D.new()
-		var sphere_mesh := SphereMesh.new()
-		sphere_mesh.radius = blob.radius
-		sphere_mesh.height = blob.radius * 2.0
-		sphere_mesh.radial_segments = 24
-		sphere_mesh.rings = 16
-		mesh_inst.mesh = sphere_mesh
-		mesh_inst.scale = Vector3(1.08, 0.92, 1.08)
-
+		var mesh_inst: MeshInstance3D = null
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = blob.color
 		mat.roughness = 0.4
 		mat.metallic = 0.1
-		mesh_inst.material_override = mat
-		visual_root.add_child(mesh_inst)
+
+		if blob_model_scene != null:
+			var model_instance := blob_model_scene.instantiate()
+			model_instance.name = "CustomBallModel"
+			var safe_native_r := maxf(0.001, blob_model_native_radius)
+			model_instance.scale = Vector3.ONE * (blob.radius / safe_native_r)
+			if tint_custom_blob_model:
+				_apply_blob_tint_recursive(model_instance, blob.color)
+			visual_root.add_child(model_instance)
+		else:
+			mesh_inst = MeshInstance3D.new()
+			var sphere_mesh := SphereMesh.new()
+			sphere_mesh.radius = blob.radius
+			sphere_mesh.height = blob.radius * 2.0
+			sphere_mesh.radial_segments = 24
+			sphere_mesh.rings = 16
+			mesh_inst.mesh = sphere_mesh
+			mesh_inst.scale = Vector3(1.08, 0.92, 1.08)
+			mesh_inst.material_override = mat
+			visual_root.add_child(mesh_inst)
+
+			var eye_mesh := SphereMesh.new()
+			eye_mesh.radius = blob.radius * 0.12
+			eye_mesh.height = blob.radius * 0.24
+			var eye_mat := StandardMaterial3D.new()
+			eye_mat.albedo_color = Color("111827")
+
+			for side in [-1.0, 1.0]:
+				var eye := MeshInstance3D.new()
+				eye.mesh = eye_mesh
+				eye.material_override = eye_mat
+				eye.position = Vector3(side * blob.radius * 0.3, blob.radius * 0.15, blob.radius * 0.95)
+				visual_root.add_child(eye)
 
 		# Inverted-hull white reticle lock-on outline
 		var outline_mesh := MeshInstance3D.new()
@@ -266,7 +297,7 @@ func _build_blobs() -> void:
 		outline_sphere.radial_segments = 24
 		outline_sphere.rings = 16
 		outline_mesh.mesh = outline_sphere
-		outline_mesh.scale = Vector3(1.08, 0.92, 1.08)
+		outline_mesh.scale = Vector3.ONE if blob_model_scene != null else Vector3(1.08, 0.92, 1.08)
 
 		var outline_mat := StandardMaterial3D.new()
 		outline_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -276,19 +307,6 @@ func _build_blobs() -> void:
 		outline_mesh.material_override = outline_mat
 		outline_mesh.visible = false
 		visual_root.add_child(outline_mesh)
-
-		var eye_mesh := SphereMesh.new()
-		eye_mesh.radius = blob.radius * 0.12
-		eye_mesh.height = blob.radius * 0.24
-		var eye_mat := StandardMaterial3D.new()
-		eye_mat.albedo_color = Color("111827")
-
-		for side in [-1.0, 1.0]:
-			var eye := MeshInstance3D.new()
-			eye.mesh = eye_mesh
-			eye.material_override = eye_mat
-			eye.position = Vector3(side * blob.radius * 0.3, blob.radius * 0.15, blob.radius * 0.95)
-			visual_root.add_child(eye)
 
 		add_child(char_body)
 
@@ -310,6 +328,18 @@ func _build_blobs() -> void:
 	_active_nodes = _all_nodes.duplicate()
 	_sync_collider_states()
 
+func _apply_blob_tint_recursive(node: Node, tint_color: Color) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		for surf_idx in range(mi.get_surface_override_material_count()):
+			var base_mat := mi.get_active_material(surf_idx)
+			var mat := (base_mat.duplicate() if base_mat != null else StandardMaterial3D.new()) as StandardMaterial3D
+			if mat != null:
+				mat.albedo_color = tint_color
+				mi.set_surface_override_material(surf_idx, mat)
+	for child in node.get_children():
+		_apply_blob_tint_recursive(child, tint_color)
+		
 func _get_standing_stack_height() -> float:
 	if _active_nodes.is_empty():
 		return 1.0
