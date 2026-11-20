@@ -13,6 +13,7 @@ signal jumped(stack_count: int, is_air_combo: bool)
 signal skid_started(origin: Vector3, skid_dir: Vector3)
 signal landed(impact_speed: float, stack_count: int)
 signal bounced(speed: float)
+signal footstep_triggered(foot_pos: Vector3, speed_ratio: float)
 
 @export_group("Visuals")
 ## Optional .glb / PackedScene to replace the default procedural sphere mesh.
@@ -126,6 +127,58 @@ signal bounced(speed: float)
 ## World Y-coordinate threshold below which blobs die or trigger a stack respawn.
 @export var void_death_y: float = -12.0
 
+@export_group("Stack Personality & Balance")
+## How much spring stiffness decreases per stack tier above the base (gives top blob looser whip).
+@export var follower_tier_stiffness_dropoff: float = 26.0
+## How much spring damping decreases per stack tier above the base.
+@export var follower_tier_damping_dropoff: float = 1.1
+## Max extra yaw (radians) the top blob turns toward movement input ahead of the base.
+@export var top_head_look_ahead_rad: float = 0.26
+## Speed at which upper blobs turn their gaze toward input or locked targets.
+@export var head_look_lerp_speed: float = 16.0
+## Pitch influence (radians) when the top blob looks up/down at an F-locked ejected blob.
+@export var target_gaze_pitch_strength: float = 0.20
+## Subtle side-to-side balancing roll (radians) per stride while upright running.
+@export var stride_sway_roll_rad: float = 0.05
+## Subtle alternating twist yaw (radians) per stride while upright running.
+@export var stride_sway_yaw_rad: float = 0.06
+
+@export_group("Transition Polish")
+## Squash compression applied during buffered pre-jump anticipation window.
+@export var pre_jump_crouch_squash: float = 0.075
+## Horizontal widen / vertical compress factor when hanging near jump apex.
+@export var air_apex_widen: float = 0.05
+## Vertical elongation factor as downward fall speed approaches terminal velocity.
+@export var air_fall_stretch: float = 0.08
+## Delay (seconds) per stack tier for the landing squash ripple to travel bottom-to-top.
+@export var landing_cascade_delay: float = 0.028
+## Downward spring tuck impulse applied to upper blobs when entering sprint-roll.
+@export var roll_entry_tuck_vel: float = -10.0
+## Upward spring pop impulse applied to upper blobs when standing back up from sprint-roll.
+@export var roll_exit_uncoil_vel: float = 15.0
+
+@export_group("Surface & Ledge Feedback")
+## Forward probe distance (meters) from base center to detect a drop-off ahead.
+@export var ledge_check_distance: float = 0.55
+## Minimum floor drop (meters) ahead of the base to trigger ledge teetering.
+@export var ledge_drop_threshold: float = 1.15
+## Backward lean angle (radians) of upper blobs when teetering over a ledge.
+@export var ledge_teeter_lean_rad: float = 0.15
+## Idle breathing speed multiplier when nervously teetering near a ledge.
+@export var ledge_teeter_breath_mult: float = 1.7
+
+@export_group("Ejected & Catch Polish")
+## Height above void_death_y (meters) at which falling ejected blobs start a nervous wobble.
+@export var ejected_void_panic_margin: float = 6.0
+## Wobble angle amplitude (radians) for ejected blobs falling near the void.
+@export var ejected_panic_wobble_rad: float = 0.13
+## Distance (meters) within which an incoming recalling/locked blob triggers catch anticipation.
+@export var catch_anticipation_distance: float = 5.5
+## Lean angle (radians) toward an incoming blob right before reabsorbing it.
+@export var catch_lean_rad: float = 0.11
+## Pre-impact squash applied right before catching a recalling blob.
+@export var catch_pre_squash: float = 0.065
+
 class StackBlob:
 	var id: int
 	var blob_name: String
@@ -149,6 +202,9 @@ class StackBlob:
 	var is_recalling: bool = false
 	var recall_time: float = 0.0
 	var recall_swoop_dir: Vector3 = Vector3.ZERO
+	var pending_land_timer: float = 0.0
+	var pending_land_intensity: float = 0.0
+	var pending_land_tier: int = 0
 
 var _all_nodes: Array[StackBlob] = []
 var _active_nodes: Array[StackBlob] = []
@@ -198,7 +254,9 @@ var _preserved_carry_speed: float = 0.0
 var _turn_bank_angle: float = 0.0
 var _midair_eject_hang_timer: float = 0.0
 var _stride_phase: float = 0.0
+var _last_step_half_cycle: int = 0
 var _forward_accel_tilt: float = 0.0
+var _ledge_teeter_blend: float = 0.0
 
 var camera_shake_offset: Vector3 = Vector3.ZERO
 var _camera_shake_vel: Vector3 = Vector3.ZERO
@@ -339,7 +397,7 @@ func _apply_blob_tint_recursive(node: Node, tint_color: Color) -> void:
 				mi.set_surface_override_material(surf_idx, mat)
 	for child in node.get_children():
 		_apply_blob_tint_recursive(child, tint_color)
-		
+
 func _get_standing_stack_height() -> float:
 	if _active_nodes.is_empty():
 		return 1.0
@@ -464,7 +522,9 @@ func respawn(spawn_point: Vector3) -> void:
 	_turn_bank_angle = 0.0
 	_midair_eject_hang_timer = 0.0
 	_stride_phase = 0.0
+	_last_step_half_cycle = 0
 	_forward_accel_tilt = 0.0
+	_ledge_teeter_blend = 0.0
 	_stack_swap_cooldown = 0.0
 	_set_highlighted_target(null)
 	_dead_nodes.clear()
@@ -499,6 +559,8 @@ func respawn(spawn_point: Vector3) -> void:
 		blob.is_recalling = false
 		blob.recall_time = 0.0
 		blob.eject_cooldown = 0.0
+		blob.pending_land_timer = 0.0
+		blob.pending_land_intensity = 0.0
 		blob.velocity = Vector3.ZERO
 		blob.squash = Vector3.ZERO
 		blob.spring_pos = Vector3.ZERO
@@ -742,7 +804,7 @@ func _update_highlight_visuals() -> void:
 		b.outline_mesh.visible = is_target
 		if is_target:
 			var outline_scale := 1.0 + pulse * 0.05
-			b.outline_mesh.scale = Vector3(1.08, 0.92, 1.08) * outline_scale
+			b.outline_mesh.scale = (Vector3.ONE if blob_model_scene != null else Vector3(1.08, 0.92, 1.08)) * outline_scale
 			b.outline_mat.albedo_color.a = 0.78 + pulse * 0.17
 
 func _is_swoop_path_occluded(from_pos: Vector3, to_pos: Vector3, target_radius: float) -> bool:
@@ -1765,7 +1827,17 @@ func _update_ejected_characters(delta: float) -> void:
 		else:
 			b.is_rolling = false
 			if not b.is_grounded:
+				if horiz_speed > 0.4:
+					var travel_yaw := atan2(b.velocity.x, b.velocity.z)
+					b.pivot.rotation.y = _lerp_angle(b.pivot.rotation.y, travel_yaw, 10.0 * delta)
 				b.visual_root.rotation.x += 10.0 * delta
+
+				var dist_above_void := b.body.global_position.y - void_death_y
+				var panic_ratio := 0.0
+				if ejected_void_panic_margin > 0.01 and dist_above_void < ejected_void_panic_margin and b.velocity.y < 0.0:
+					panic_ratio = clampf(1.0 - (dist_above_void / ejected_void_panic_margin), 0.0, 1.0)
+				var panic_wobble := sin(_elapsed * 26.0 + float(b.id) * 1.7) * ejected_panic_wobble_rad * panic_ratio
+				b.visual_root.rotation.z = _lerp_angle(b.visual_root.rotation.z, panic_wobble, 16.0 * delta)
 				b.visual_root.scale = Vector3(1.0 + b.squash.x, 1.0 + b.squash.y, 1.0 + b.squash.z)
 			else:
 				b.visual_root.rotation.x = _lerp_angle(b.visual_root.rotation.x, 0.0, 12.0 * delta)
@@ -1844,7 +1916,71 @@ func _rotate_horizontal_vector(vec: Vector3, target_dir: Vector3, max_angle_step
 	var next_angle := cur_angle + step
 	return Vector3(sin(next_angle) * spd, 0.0, cos(next_angle) * spd)
 
+func _check_ledge_ahead(bottom: StackBlob) -> float:
+	if not _is_grounded or _is_sprint_rolling or ledge_check_distance <= 0.01:
+		return 0.0
+	var horiz_spd := Vector2(_leader_vel.x, _leader_vel.z).length()
+	if horiz_spd > 0.85:
+		return 0.0
+
+	var fwd := Vector3(sin(_facing_angle), 0.0, cos(_facing_angle))
+	var probe_origin := bottom.body.global_position + fwd * ledge_check_distance
+	var feet_y := bottom.body.global_position.y - bottom.radius * 0.85
+	var ray_to := Vector3(probe_origin.x, feet_y - ledge_drop_threshold - 0.5, probe_origin.z)
+
+	var query := PhysicsRayQueryParameters3D.create(probe_origin, ray_to)
+	query.exclude = _get_all_blob_rids()
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return 1.0
+	var drop := feet_y - (hit["position"] as Vector3).y
+	return clampf((drop - 0.35) / maxf(0.1, ledge_drop_threshold - 0.35), 0.0, 1.0)
+
+func _get_catch_anticipation(bottom: StackBlob) -> Dictionary:
+	var result := {"weight": 0.0, "dir": Vector3.ZERO}
+	if _ejected_nodes.is_empty() or catch_anticipation_distance <= 0.01:
+		return result
+
+	var stack_pos := bottom.body.global_position
+	var best_weight := 0.0
+	var best_dir := Vector3.ZERO
+
+	for b in _ejected_nodes:
+		if _dead_nodes.has(b) or _locked_ejected_nodes.has(b):
+			continue
+		if not b.is_recalling and b != _highlighted_ejected_node:
+			continue
+		var diff := b.body.global_position - stack_pos
+		var dist := diff.length()
+		if dist > 0.1 and dist < catch_anticipation_distance:
+			var w := (1.0 - (dist / catch_anticipation_distance)) * (1.0 if b.is_recalling else 0.55)
+			if w > best_weight:
+				best_weight = w
+				best_dir = diff / dist
+
+	result["weight"] = best_weight
+	result["dir"] = best_dir
+	return result
+
+func _process_landing_ripples(delta: float) -> void:
+	for b in _active_nodes:
+		if b.pending_land_timer > 0.0:
+			b.pending_land_timer -= delta
+			if b.pending_land_timer <= 0.0:
+				b.pending_land_timer = 0.0
+				var intensity := b.pending_land_intensity
+				var tier := b.pending_land_tier
+				var f := intensity * (1.0 - float(tier) * 0.12)
+				_apply_squash(b, 0.36 * f, -0.32 * f)
+				b.spring_vel.y = 22.0 * intensity + float(tier) * 3.5
+				b.spring_vel.x += randf_range(-3.5, 3.5) * intensity
+				b.spring_vel.z += randf_range(-3.5, 3.5) * intensity
+
 func _update_active_stack(delta: float, input_dir: Vector3) -> void:
+	_process_landing_ripples(delta)
+
 	var bottom := _active_nodes[0]
 	var sprint_held := _read_sprint_held()
 	var has_move_input := input_dir.length_squared() > 0.0
@@ -1866,6 +2002,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 		var back_z := -cos(_facing_angle)
 		for i in range(1, _active_nodes.size()):
 			_active_nodes[i].velocity = Vector3(back_x * 4.0 * float(i), 0.0, back_z * 4.0 * float(i))
+			_active_nodes[i].spring_vel.y = roll_entry_tuck_vel * (1.0 + float(i) * 0.2)
 
 		for idx in range(_active_nodes.size()):
 			_apply_squash(_active_nodes[idx], -0.2 + idx * 0.02, 0.22 - idx * 0.02)
@@ -1885,6 +2022,8 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 
 		for idx in range(_active_nodes.size()):
 			_apply_squash(_active_nodes[idx], 0.24 - idx * 0.03, -0.22 + idx * 0.03)
+			if idx > 0:
+				_active_nodes[idx].spring_vel.y = roll_exit_uncoil_vel * (0.85 + float(idx) * 0.22)
 
 	var target_blend := 0.0
 	var blend_rate := 26.0
@@ -2051,6 +2190,7 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 
 		for idx in range(_active_nodes.size()):
 			var b := _active_nodes[idx]
+			b.pending_land_timer = 0.0
 			_apply_squash(b, -0.3 + idx * 0.02, 0.38 - idx * 0.03)
 			b.spring_vel.y = 18.0 + idx * 2.0
 
@@ -2092,33 +2232,53 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 			var intensity := clampf(impact_speed / 22.0, 0.35, 1.0)
 			for idx in range(_active_nodes.size()):
 				var b := _active_nodes[idx]
-				var f := intensity * (1.0 - idx * 0.14)
-				_apply_squash(b, 0.38 * f, -0.34 * f)
-				b.spring_vel.y = 24.0 * intensity + idx * 3.0
-				b.spring_vel.x = randf_range(-4.0, 4.0) * intensity
-				b.spring_vel.z = randf_range(-4.0, 4.0) * intensity
+				if idx == 0 or landing_cascade_delay <= 0.001:
+					_apply_squash(b, 0.38 * intensity, -0.34 * intensity)
+					b.spring_vel.y = 24.0 * intensity
+					b.spring_vel.x = randf_range(-4.0, 4.0) * intensity
+					b.spring_vel.z = randf_range(-4.0, 4.0) * intensity
+				else:
+					b.pending_land_timer = landing_cascade_delay * float(idx)
+					b.pending_land_intensity = intensity
+					b.pending_land_tier = idx
 
-	# --- Forward Acceleration Tilt, Rhythmic Stride & Skid Lean ---
+	# --- Forward Acceleration Tilt, Rhythmic Stride, Ledge Teeter & Catch Anticipation ---
 	var new_horiz_vel := Vector3(_leader_vel.x, 0.0, _leader_vel.z)
 	var roll_speed := new_horiz_vel.length()
 	var forward_dir := Vector3(sin(_facing_angle), 0.0, cos(_facing_angle))
 	var forward_accel := (new_horiz_vel - _prev_horiz_vel).dot(forward_dir) / maxf(0.0001, delta)
 	_prev_horiz_vel = new_horiz_vel
 
+	var target_ledge := _check_ledge_ahead(bottom)
+	_ledge_teeter_blend = lerpf(_ledge_teeter_blend, target_ledge, 1.0 - exp(-12.0 * delta))
+
+	var catch_info := _get_catch_anticipation(bottom)
+	var catch_weight: float = catch_info["weight"]
+	var catch_dir: Vector3 = catch_info["dir"]
+
 	var is_upright_running := _is_grounded and not _is_sprint_rolling and not _is_skidding and roll_speed > 1.2
 	var target_accel_tilt := 0.0
 	var stride_bob_y := 0.0
 	var stride_squash := 0.0
+	var stride_signed_wave := 0.0
+	var walk_ratio := 0.0
 
 	if is_upright_running:
-		var walk_ratio := clampf(roll_speed / move_speed, 0.0, 1.35)
+		walk_ratio = clampf(roll_speed / move_speed, 0.0, 1.35)
 		_stride_phase += (7.5 + walk_ratio * 7.5) * delta
-		var step_wave := absf(sin(_stride_phase))
+		var half_cycle := int(floor(_stride_phase / PI))
+		if half_cycle != _last_step_half_cycle:
+			_last_step_half_cycle = half_cycle
+			var foot_pos := bottom.body.global_position - Vector3(0.0, bottom.radius * 0.85, 0.0)
+			footstep_triggered.emit(foot_pos, walk_ratio)
+		stride_signed_wave = sin(_stride_phase)
+		var step_wave := absf(stride_signed_wave)
 		stride_bob_y = step_wave * 0.075 * minf(1.0, walk_ratio)
 		stride_squash = (step_wave - 0.5) * 0.055 * minf(1.0, walk_ratio)
 		target_accel_tilt = clampf(forward_accel * 0.0032 + walk_ratio * 0.065, -0.08, 0.22)
 	else:
 		_stride_phase = 0.0
+		_last_step_half_cycle = 0
 
 	_forward_accel_tilt = lerpf(_forward_accel_tilt, target_accel_tilt, 1.0 - exp(-14.0 * delta))
 
@@ -2128,60 +2288,106 @@ func _update_active_stack(delta: float, input_dir: Vector3) -> void:
 	else:
 		_roll_spin_angle = 0.0
 
-	var base_pitch := -0.36 if _is_skidding else _forward_accel_tilt
+	var base_pitch := -0.36 if _is_skidding else (_forward_accel_tilt - _ledge_teeter_blend * 0.04)
 	bottom.pivot.rotation.y = _lerp_angle(bottom.pivot.rotation.y, _facing_angle, 22.0 * delta)
 	bottom.pivot.rotation.x = _lerp_angle(bottom.pivot.rotation.x, base_pitch, 20.0 * delta)
 
+	var base_sway_roll := stride_signed_wave * stride_sway_roll_rad * minf(1.0, walk_ratio) * (1.0 - _roll_blend)
 	bottom.visual_root.rotation.x = _roll_spin_angle * _roll_blend
-	bottom.visual_root.rotation.z = _turn_bank_angle
+	bottom.visual_root.rotation.z = _turn_bank_angle + base_sway_roll
 	bottom.visual_root.position.y = lerpf(bottom.visual_root.position.y, stride_bob_y, 1.0 - exp(-24.0 * delta))
 
 	_update_squash_springs(delta)
 
+	# Anticipation & Air-Shape Modifiers (Pre-jump crouch, Apex widen, Fall stretch, Catch pre-squash)
+	var pre_crouch := pre_jump_crouch_squash if (_is_grounded and _jump_buffer_timer > 0.0) else 0.0
+	var apex_factor := (1.0 - clampf(absf(_leader_vel.y) / 4.0, 0.0, 1.0)) if not _is_grounded else 0.0
+	var fall_factor := clampf(-_leader_vel.y / terminal_velocity, 0.0, 1.0) if (not _is_grounded and _leader_vel.y < 0.0) else 0.0
+	var air_xz_shape := apex_factor * air_apex_widen - fall_factor * (air_fall_stretch * 0.5)
+	var air_y_shape := -apex_factor * (air_apex_widen * 0.8) + fall_factor * air_fall_stretch
+	var catch_squash_xz := catch_weight * catch_pre_squash
+	var catch_squash_y := -catch_weight * catch_pre_squash * 0.85
+
 	var speed_stretch := _roll_blend * clampf(roll_speed / sprint_roll_speed, 0.0, 1.0) * 0.06
 	var roll_roundness := 1.0 - _roll_blend * 0.06
-	var breath := sin(_elapsed * 5.0) * 0.03 * (1.0 - _roll_blend)
+	var breath_rate := 5.0 * lerpf(1.0, ledge_teeter_breath_mult, _ledge_teeter_blend)
+	var breath := sin(_elapsed * breath_rate) * 0.03 * (1.0 - _roll_blend)
 	bottom.squash = bottom.squash.lerp(Vector3.ZERO, minf(1.0, 16.0 * delta))
 	bottom.visual_root.scale = Vector3(
-		(1.0 + breath + bottom.squash.x + stride_squash - speed_stretch * 0.5) * roll_roundness,
-		1.0 - breath + bottom.squash.y - stride_squash - speed_stretch * 0.5,
-		(1.0 + breath + bottom.squash.z + stride_squash + speed_stretch) * roll_roundness
+		(1.0 + breath + bottom.squash.x + stride_squash + pre_crouch + air_xz_shape + catch_squash_xz - speed_stretch * 0.5) * roll_roundness,
+		1.0 - breath + bottom.squash.y - stride_squash - pre_crouch + air_y_shape + catch_squash_y - speed_stretch * 0.5,
+		(1.0 + breath + bottom.squash.z + stride_squash + pre_crouch + air_xz_shape + catch_squash_xz + speed_stretch) * roll_roundness
 	)
 
 	if _is_sprint_rolling:
 		_update_sprint_roll_followers(delta, speed_stretch, roll_roundness)
 	else:
-		_update_vertical_stack_followers(delta, stride_bob_y, stride_squash)
+		_update_vertical_stack_followers(
+			delta,
+			input_dir,
+			stride_bob_y,
+			stride_squash,
+			stride_signed_wave,
+			walk_ratio,
+			pre_crouch,
+			air_xz_shape,
+			air_y_shape,
+			catch_weight,
+			catch_dir
+		)
 
-func _update_vertical_stack_followers(delta: float, stride_bob_y: float = 0.0, stride_squash: float = 0.0) -> void:
+func _update_vertical_stack_followers(
+	delta: float,
+	input_dir: Vector3,
+	stride_bob_y: float = 0.0,
+	stride_squash: float = 0.0,
+	stride_signed_wave: float = 0.0,
+	walk_ratio: float = 0.0,
+	pre_crouch: float = 0.0,
+	air_xz_shape: float = 0.0,
+	air_y_shape: float = 0.0,
+	catch_weight: float = 0.0,
+	catch_dir: Vector3 = Vector3.ZERO
+) -> void:
 	var line_heading := _active_nodes[0].pivot.rotation.y
 	var skid_fwd := Vector3(sin(_facing_angle), 0.0, cos(_facing_angle))
+	var breath_rate := 5.0 * lerpf(1.0, ledge_teeter_breath_mult, _ledge_teeter_blend)
+	var catch_squash_xz := catch_weight * catch_pre_squash
+	var catch_squash_y := -catch_weight * catch_pre_squash * 0.85
 
 	for i in range(1, _active_nodes.size()):
 		var below := _active_nodes[i - 1]
 		var curr := _active_nodes[i]
+		var is_top := (i == _active_nodes.size() - 1)
+		var tier_f := float(i)
 
-		var node_breath := sin(_elapsed * 5.0 - float(i) * 0.8) * 0.035
-		var tier_stride_bob := stride_bob_y * (1.0 + float(i) * 0.25)
-		var tier_stride_squash := stride_squash * (1.0 + float(i) * 0.15)
+		var node_breath := sin(_elapsed * breath_rate - tier_f * 0.8) * 0.035
+		var tier_stride_bob := stride_bob_y * (1.0 + tier_f * 0.25)
+		var tier_stride_squash := stride_squash * (1.0 + tier_f * 0.15)
 		curr.squash = curr.squash.lerp(Vector3.ZERO, minf(1.0, 16.0 * delta))
 		curr.visual_root.position.y = lerpf(curr.visual_root.position.y, tier_stride_bob, 1.0 - exp(-22.0 * delta))
 		curr.visual_root.scale = Vector3(
-			1.0 + node_breath + curr.squash.x + tier_stride_squash,
-			1.0 - node_breath + curr.squash.y - tier_stride_squash,
-			1.0 + node_breath + curr.squash.z + tier_stride_squash
+			1.0 + node_breath + curr.squash.x + tier_stride_squash + pre_crouch + air_xz_shape + catch_squash_xz,
+			1.0 - node_breath + curr.squash.y - tier_stride_squash - pre_crouch + air_y_shape + catch_squash_y,
+			1.0 + node_breath + curr.squash.z + tier_stride_squash + pre_crouch + air_xz_shape + catch_squash_xz
 		)
 
 		var spacing := below.radius + curr.radius * 0.92
 		var v_stretch := clampf(_leader_vel.y * 0.012, -0.18, 0.22)
 		var target_y := below.body.global_position.y + spacing + v_stretch
 
-		var inertia_lead := skid_fwd * (0.34 * float(i)) if _is_skidding else Vector3.ZERO
-		var disp_x := (below.body.global_position.x + inertia_lead.x) - curr.body.global_position.x
-		var disp_z := (below.body.global_position.z + inertia_lead.z) - curr.body.global_position.z
+		var inertia_lead := skid_fwd * (0.34 * tier_f) if _is_skidding else Vector3.ZERO
+		var teeter_back := -skid_fwd * (_ledge_teeter_blend * 0.12 * tier_f)
+		var catch_pull := Vector3(catch_dir.x, 0.0, catch_dir.z) * (catch_weight * 0.14 * tier_f)
 
-		var fx := disp_x * follower_spring_stiffness - curr.velocity.x * follower_spring_damping
-		var fz := disp_z * follower_spring_stiffness - curr.velocity.z * follower_spring_damping
+		var disp_x := (below.body.global_position.x + inertia_lead.x + teeter_back.x + catch_pull.x) - curr.body.global_position.x
+		var disp_z := (below.body.global_position.z + inertia_lead.z + teeter_back.z + catch_pull.z) - curr.body.global_position.z
+
+		var tier_stiffness := maxf(60.0, follower_spring_stiffness - follower_tier_stiffness_dropoff * tier_f)
+		var tier_damping := maxf(4.0, follower_spring_damping - follower_tier_damping_dropoff * tier_f)
+
+		var fx := disp_x * tier_stiffness - curr.velocity.x * tier_damping
+		var fz := disp_z * tier_stiffness - curr.velocity.z * tier_damping
 
 		curr.velocity.x += fx * delta
 		curr.velocity.z += fz * delta
@@ -2194,11 +2400,35 @@ func _update_vertical_stack_followers(delta: float, stride_bob_y: float = 0.0, s
 			1.0 - exp(-32.0 * delta)
 		)
 
-		var follower_pitch := (0.28 + float(i) * 0.07) if _is_skidding else (_forward_accel_tilt * (1.0 + float(i) * 0.2))
-		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, line_heading, 20.0 * delta)
+		# Independent head-look & target gaze
+		var desired_yaw := line_heading
+		if catch_weight > 0.15 and Vector2(catch_dir.x, catch_dir.z).length_squared() > 0.01:
+			var catch_yaw := atan2(catch_dir.x, catch_dir.z)
+			desired_yaw = _lerp_angle(desired_yaw, catch_yaw, catch_weight * (0.75 if is_top else 0.35))
+		elif input_dir.length_squared() > 0.01 and not _is_skidding:
+			var input_yaw := atan2(input_dir.x, input_dir.z)
+			var yaw_delta := fposmod(input_yaw - line_heading + PI, TAU) - PI
+			var look_scale := 1.0 if is_top else 0.45
+			desired_yaw = line_heading + clampf(yaw_delta, -top_head_look_ahead_rad * look_scale, top_head_look_ahead_rad * look_scale)
+
+		var alt_sign := -1.0 if (i % 2 == 1) else 1.0
+		var sway_yaw := stride_signed_wave * stride_sway_yaw_rad * minf(1.0, walk_ratio) * alt_sign * tier_f
+		var sway_roll := stride_signed_wave * stride_sway_roll_rad * minf(1.0, walk_ratio) * alt_sign * (0.7 + 0.3 * tier_f)
+
+		var target_gaze_pitch := 0.0
+		if is_top and _highlighted_ejected_node != null and not _dead_nodes.has(_highlighted_ejected_node):
+			var to_locked := _highlighted_ejected_node.body.global_position - curr.body.global_position
+			var flat_dist := maxf(0.5, Vector2(to_locked.x, to_locked.z).length())
+			target_gaze_pitch = clampf(-atan2(to_locked.y, flat_dist), -1.0, 1.0) * target_gaze_pitch_strength
+
+		var teeter_pitch := -_ledge_teeter_blend * ledge_teeter_lean_rad * tier_f
+		var catch_pitch := catch_weight * catch_lean_rad * tier_f
+		var follower_pitch := (0.28 + tier_f * 0.07) if _is_skidding else (_forward_accel_tilt * (1.0 + tier_f * 0.2) + teeter_pitch + catch_pitch + target_gaze_pitch)
+
+		curr.pivot.rotation.y = _lerp_angle(curr.pivot.rotation.y, desired_yaw + sway_yaw, head_look_lerp_speed * delta)
 		curr.pivot.rotation.x = _lerp_angle(curr.pivot.rotation.x, follower_pitch, 20.0 * delta)
 		curr.visual_root.rotation.x = curr.velocity.z * 0.035
-		curr.visual_root.rotation.z = lerpf(curr.visual_root.rotation.z, -curr.velocity.x * 0.035 + _turn_bank_angle * 0.6, 16.0 * delta)
+		curr.visual_root.rotation.z = lerpf(curr.visual_root.rotation.z, -curr.velocity.x * 0.035 + _turn_bank_angle * 0.6 + sway_roll, 16.0 * delta)
 
 func _sample_follower_feet_y(
 	pos_x: float,
@@ -2445,7 +2675,6 @@ func launch_stack_from_cannon(muzzle_pos: Vector3, launch_dir: Vector3, launch_v
 	for i: int in range(_active_nodes.size()):
 		var b: StackBlob = _active_nodes[i]
 		b.body.global_position = muzzle_pos + launch_dir * (float(i) * 0.85)
-		b.body.velocity = launch_vel
 		b.body.velocity = launch_vel
 		b.velocity = Vector3.ZERO
 		b.visual_root.scale = Vector3.ONE
