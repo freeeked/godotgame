@@ -20,12 +20,17 @@ enum CameraFeelMode {
 @export var max_zoom_distance: float = 15.0
 ## Distance change (meters) applied per mouse wheel scroll notch.
 @export var zoom_step: float = 0.95
-## Sphere-cast padding radius (meters) keeping the camera from clipping into walls and floors.
-@export var camera_collision_margin: float = 0.45
 ## Gentle yaw assist (rad/s) when strafing perpendicular to camera (0.0 prevents unwanted horizon drift).
 @export var strafe_orbit_assist_speed: float = 0.12
 ## How long (seconds) manual look input suppresses auto-assist and extra horizon tilt.
 @export var manual_look_grace_time: float = 0.85
+
+## Sphere-cast padding radius (meters) keeping the camera from clipping into walls and floors.
+@export var camera_collision_margin: float = 0.28
+## How fast the camera tucks inward when blocked by a wall (higher = prevents clipping).
+@export var camera_collide_in_speed: float = 34.0
+## How smoothly the camera glides back out after passing a wall corner (prevents flicker).
+@export var camera_collide_out_speed: float = 8.5
 
 @export_group("Grounded Vertical Hysteresis")
 ## Upward jump deadzone (meters) above last grounded height before camera rises to follow climbs.
@@ -104,6 +109,7 @@ var _manual_orbit_yield_timer: float = 0.0
 
 var _target_zoom_distance: float = 7.6
 var _current_zoom_distance: float = 7.6
+var _smoothed_collision_dist: float = 7.6
 var _smoothed_boost_ratio: float = 0.0
 
 # Critically damped spring follow & grounded vertical hysteresis state
@@ -123,6 +129,7 @@ func _ready() -> void:
 	var default_dist := _get_mode_follow_distance()
 	_target_zoom_distance = clampf(default_dist, min_zoom_distance, max_zoom_distance)
 	_current_zoom_distance = _target_zoom_distance
+	_smoothed_collision_dist = _current_zoom_distance
 
 	_setup_lighting_if_needed()
 	_setup_camera()
@@ -153,6 +160,7 @@ func _ready() -> void:
 			_reset_level_contraptions()
 			_refresh_stack_hud()
 			_dust.clear_all()
+			_smoothed_collision_dist = _current_zoom_distance
 		)
 		_refresh_stack_hud()
 
@@ -317,41 +325,71 @@ func _setup_camera() -> void:
 	_camera.fov = snappy_base_fov if camera_mode == CameraFeelMode.SNAPPY else fluid_base_fov
 	_camera.current = true
 
-func _sweep_camera_segment(from_pos: Vector3, to_pos: Vector3, margin: float, exclude_rids: Array[RID]) -> Vector3:
+func _cast_camera_ray(from_pos: Vector3, to_pos: Vector3, exclude_rids: Array[RID]) -> float:
 	var segment := to_pos - from_pos
 	var dist := segment.length()
 	if dist <= 0.001:
-		return from_pos
+		return 1.0
 
-	var dir := segment / dist
-	var sphere := SphereShape3D.new()
-	sphere.radius = margin
-
-	var query := PhysicsShapeQueryParameters3D.new()
-	query.shape = sphere
-	query.transform = Transform3D(Basis.IDENTITY, from_pos)
-	query.motion = dir * dist
+	var query := PhysicsRayQueryParameters3D.create(from_pos, to_pos)
 	query.exclude = exclude_rids
 	query.collide_with_areas = false
 	query.collide_with_bodies = true
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if not hit.is_empty():
+		var hit_dist := from_pos.distance_to(hit["position"] as Vector3)
+		return clampf((hit_dist - camera_collision_margin) / dist, 0.0, 1.0)
+	return 1.0
 
-	var fractions := get_world_3d().direct_space_state.cast_motion(query)
-	if fractions.size() >= 2:
-		var safe_t := clampf(fractions[1] - 0.02, 0.0, 1.0)
-		return from_pos + dir * (dist * safe_t)
-
-	return to_pos
-
-func _resolve_wall_safe_camera(center_pivot: Vector3, desired_shoulder_pivot: Vector3, desired_cam_pos: Vector3) -> Vector3:
+func _resolve_wall_safe_camera(center_pivot: Vector3, desired_shoulder_pivot: Vector3, desired_cam_pos: Vector3, delta: float) -> Vector3:
 	var exclude_rids: Array[RID] = []
 	if player_stack != null:
 		for child in player_stack.get_children():
 			if child is CollisionObject3D:
 				exclude_rids.append((child as CollisionObject3D).get_rid())
 
-	var safe_shoulder := _sweep_camera_segment(center_pivot, desired_shoulder_pivot, camera_collision_margin, exclude_rids)
-	return _sweep_camera_segment(safe_shoulder, desired_cam_pos, camera_collision_margin, exclude_rids)
+	# 1. Keep shoulder pivot from poking through walls
+	var shoulder_t := _cast_camera_ray(center_pivot, desired_shoulder_pivot, exclude_rids)
+	var safe_shoulder := center_pivot.lerp(desired_shoulder_pivot, shoulder_t)
 
+	# 2. Cast a center ray + 4 corner feelers around the camera lens so corners don't cause single-frame snaps
+	var cam_vec := desired_cam_pos - safe_shoulder
+	var desired_dist := cam_vec.length()
+	if desired_dist <= 0.001:
+		return safe_shoulder
+
+	var cam_dir := cam_vec / desired_dist
+	var cam_right := _camera.global_transform.basis.x
+	var cam_up := _camera.global_transform.basis.y
+	var whisker_spread := camera_collision_margin * 0.85
+
+	var offsets := [
+		Vector3.ZERO,
+		(cam_right + cam_up) * whisker_spread,
+		(-cam_right + cam_up) * whisker_spread,
+		(cam_right - cam_up) * whisker_spread,
+		(-cam_right - cam_up) * whisker_spread,
+	]
+
+	var min_t := 1.0
+	var center_t := 1.0
+	for i in range(offsets.size()):
+		var t := _cast_camera_ray(safe_shoulder + offsets[i] * 0.35, desired_cam_pos + offsets[i], exclude_rids)
+		if i == 0:
+			center_t = t
+		min_t = minf(min_t, t)
+
+	# Blend center ray with peripheral feelers so grazing an edge nudges softly instead of plunging to minimum
+	var target_t := lerpf(min_t, center_t, 0.35)
+	var target_dist := maxf(1.35, desired_dist * target_t)
+
+	# 3. Fast tuck-in when blocked, smooth glide-out when clearing corners
+	if _smoothed_collision_dist > desired_dist:
+		_smoothed_collision_dist = desired_dist
+	var rate := camera_collide_in_speed if target_dist < _smoothed_collision_dist else camera_collide_out_speed
+	_smoothed_collision_dist = lerpf(_smoothed_collision_dist, target_dist, 1.0 - exp(-rate * delta))
+
+	return safe_shoulder + cam_dir * minf(_smoothed_collision_dist, desired_dist)
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_ESCAPE:
@@ -550,8 +588,7 @@ func _physics_process(delta: float) -> void:
 	var rot := Basis.from_euler(Vector3(_current_pitch, _current_yaw, 0.0))
 	var dyn_dist := _current_zoom_distance + (0.85 if is_fluid else 0.45) * _smoothed_boost_ratio
 	var desired_cam_pos := desired_shoulder_pivot + rot * Vector3(0.0, 0.0, dyn_dist)
-	var safe_cam_pos := _resolve_wall_safe_camera(center_pivot, desired_shoulder_pivot, desired_cam_pos)
-
+	var safe_cam_pos := _resolve_wall_safe_camera(center_pivot, desired_shoulder_pivot, desired_cam_pos, delta)
 	var pitch_aim_y := tan(_current_pitch) * 7.2
 	var look_target := (
 		tracked_anchor
