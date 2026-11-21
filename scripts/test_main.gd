@@ -2,14 +2,16 @@ extends Node3D
 
 @onready var player_stack: PlayerStack = get_node_or_null("PlayerStack") as PlayerStack
 
-enum CameraFeelMode {
-	SNAPPY = 0,
-	CINEMATIC_FLUID = 1,
+enum CameraFramingStyle {
+	WIDE_OTS = 0,         # Option 1: Wider Splatoon/Ratchet over-the-shoulder offset
+	ODYSSEY_HIGH = 1,     # Option 2: Centered Mario Odyssey camera elevated above top blob
+	DYNAMIC_STACK = 2,    # Option 3: Auto-scales framing with stack count & sprint-roll state
+	ACTION_AIM_SPLIT = 3, # Option 4: Wide platforming view; tightens to OTS on RMB aim or ejected blob
 }
 
-@export_group("Camera Mode & Controls")
-## Active camera preset (SNAPPY for tight platforming, CINEMATIC_FLUID for looser drift and heavier momentum feel).
-@export var camera_mode: CameraFeelMode = CameraFeelMode.SNAPPY
+@export_group("Camera Framing & Controls")
+## Select which camera framing style to use in the editor.
+@export var framing_style: CameraFramingStyle = CameraFramingStyle.DYNAMIC_STACK
 ## Mouse look rotation speed in radians per pixel of cursor movement.
 @export var orbit_sensitivity: float = 0.0034
 ## Keyboard camera rotation speed (I/J/K/L or orbit actions) in radians per second.
@@ -17,7 +19,7 @@ enum CameraFeelMode {
 ## Closest zoom distance (meters) allowed when scrolling in with the mouse wheel.
 @export var min_zoom_distance: float = 4.5
 ## Farthest zoom distance (meters) allowed when scrolling out with the mouse wheel.
-@export var max_zoom_distance: float = 15.0
+@export var max_zoom_distance: float = 16.0
 ## Distance change (meters) applied per mouse wheel scroll notch.
 @export var zoom_step: float = 0.95
 ## Gentle yaw assist (rad/s) when strafing perpendicular to camera (0.0 prevents unwanted horizon drift).
@@ -25,74 +27,79 @@ enum CameraFeelMode {
 ## How long (seconds) manual look input suppresses auto-assist and extra horizon tilt.
 @export var manual_look_grace_time: float = 0.85
 
+@export_group("Core Camera Feel")
+## Critically damped horizontal spring frequency (higher = tighter lock, lower = more elastic surge).
+@export var spring_freq: float = 19.0
+## Vertical tracking smoothing speed toward the grounded floor baseline.
+@export var vert_smooth: float = 9.0
+## Rotational smoothing speed for yaw/pitch orbit (higher = closer to raw 1:1 mouse response).
+@export var orbit_smooth: float = 46.0
+## Smoothing speed when interpolating zoom distance changes.
+@export var zoom_smooth: float = 14.0
+## Smoothing speed when blending between dynamic camera framing states (Options 3 & 4).
+@export var framing_blend_speed: float = 7.5
+## Velocity look-ahead multiplier shifting the aim frame gently on bursts/skids.
+@export var velocity_lead: float = 0.06
+## Forward distance (meters) along camera facing that the look target projects ahead.
+@export var look_ahead_forward: float = 1.8
+## Maximum camera roll tilt (degrees) when banking into turns.
+@export var bank_roll_deg: float = 0.75
+## Resting field of view (degrees) at normal movement speeds.
+@export var base_fov: float = 74.0
+## Peak field of view (degrees) during sprint-rolls, long jumps, swoops, or cannon boosts.
+@export var boost_fov: float = 79.0
+
+@export_group("Option 1 - Wide Over-The-Shoulder")
+@export var wide_ots_distance: float = 8.9
+@export var wide_ots_shoulder_x: float = 1.6
+@export var wide_ots_pivot_height: float = 1.65
+@export var wide_ots_look_height: float = 1.95
+@export var wide_ots_default_pitch: float = -0.15
+
+@export_group("Option 2 - Odyssey High Centered")
+@export var odyssey_distance: float = 9.4
+@export var odyssey_shoulder_x: float = 0.0
+@export var odyssey_pivot_height: float = 2.55
+@export var odyssey_look_height: float = 2.95
+@export var odyssey_default_pitch: float = -0.25
+
+@export_group("Option 3 - Dynamic Stack-Height")
+## Framing values when stacked 3 blobs tall.
+@export var dyn_tall_distance: float = 9.3
+@export var dyn_tall_shoulder_x: float = 1.45
+@export var dyn_tall_pivot_height: float = 2.35
+@export var dyn_tall_look_height: float = 2.65
+## Framing values when down to 1 blob or flat sprint-rolling.
+@export var dyn_low_distance: float = 7.0
+@export var dyn_low_shoulder_x: float = 0.85
+@export var dyn_low_pivot_height: float = 1.3
+@export var dyn_low_look_height: float = 1.55
+@export var dyn_default_pitch: float = -0.18
+
+@export_group("Option 4 - Action / Aim Split")
+## Relaxed platforming view when moving freely.
+@export var split_explore_distance: float = 9.6
+@export var split_explore_shoulder_x: float = 0.25
+@export var split_explore_pivot_height: float = 2.4
+@export var split_explore_look_height: float = 2.75
+## Tightened aim view when holding Right Mouse Button or while a blob is ejected.
+@export var split_aim_distance: float = 7.4
+@export var split_aim_shoulder_x: float = 1.55
+@export var split_aim_pivot_height: float = 1.65
+@export var split_aim_look_height: float = 1.9
+@export var split_default_pitch: float = -0.18
+
+@export_group("Wall Avoidance & Vertical Deadzone")
 ## Sphere-cast padding radius (meters) keeping the camera from clipping into walls and floors.
 @export var camera_collision_margin: float = 0.28
 ## How fast the camera tucks inward when blocked by a wall (higher = prevents clipping).
 @export var camera_collide_in_speed: float = 34.0
 ## How smoothly the camera glides back out after passing a wall corner (prevents flicker).
 @export var camera_collide_out_speed: float = 8.5
-
-@export_group("Grounded Vertical Hysteresis")
 ## Upward jump deadzone (meters) above last grounded height before camera rises to follow climbs.
 @export var vertical_deadzone_up: float = 2.6
 ## Downward drop deadzone (meters) below last grounded height before camera drops to follow falls.
 @export var vertical_deadzone_down: float = 0.75
-
-@export_group("Snappy Camera Tuning")
-## Default follow distance (meters) behind the stack in Snappy mode.
-@export var snappy_follow_distance: float = 7.6
-## Horizontal over-the-shoulder offset (meters) to keep the crosshair clear of the stack.
-@export var snappy_shoulder_offset_x: float = 0.9
-## Vertical height (meters) above the base blob where the camera rig orbits.
-@export var snappy_pivot_height: float = 1.5
-## Vertical height (meters) above the base blob where the camera aims.
-@export var snappy_look_ahead_height: float = 1.85
-## Forward distance (meters) along camera facing that the look target projects ahead.
-@export var snappy_look_ahead_forward: float = 1.6
-## Velocity look-ahead multiplier shifting the aim frame gently on bursts/skids.
-@export var snappy_velocity_lead: float = 0.045
-## Critically damped horizontal spring frequency (higher = tighter lock, lower = more elastic surge).
-@export var snappy_spring_freq: float = 18.0
-## Vertical tracking smoothing speed toward the grounded floor baseline.
-@export var snappy_vert_smooth: float = 7.5
-## Rotational smoothing speed for yaw/pitch orbit (higher = closer to raw 1:1 mouse response).
-@export var snappy_orbit_smooth: float = 48.0
-## Smoothing speed when interpolating zoom distance changes.
-@export var snappy_zoom_smooth: float = 16.0
-## Maximum camera roll tilt (degrees) when banking into turns (keep low to avoid nausea).
-@export var snappy_bank_roll_deg: float = 0.55
-## Resting field of view (degrees) at normal movement speeds in Snappy mode.
-@export var snappy_base_fov: float = 72.0
-## Peak field of view (degrees) during sprint-rolls, long jumps, swoops, or cannon boosts.
-@export var snappy_boost_fov: float = 76.0
-
-@export_group("Cinematic Fluid Camera Tuning")
-## Default follow distance (meters) behind the stack in Cinematic Fluid mode.
-@export var fluid_follow_distance: float = 8.6
-## Horizontal over-the-shoulder offset (meters) in Cinematic Fluid mode.
-@export var fluid_shoulder_offset_x: float = 1.1
-## Vertical height (meters) above the base blob where the camera rig orbits in Fluid mode.
-@export var fluid_pivot_height: float = 1.65
-## Vertical height (meters) above the base blob where the camera aims in Fluid mode.
-@export var fluid_look_ahead_height: float = 2.0
-## Forward distance (meters) along camera facing that the look target projects ahead in Fluid mode.
-@export var fluid_look_ahead_forward: float = 2.4
-## Velocity look-ahead multiplier shifting the aim frame ahead of high-speed movement in Fluid mode.
-@export var fluid_velocity_lead: float = 0.085
-## Critically damped horizontal spring frequency (lower values let the blobs visibly surge ahead on bursts).
-@export var fluid_spring_freq: float = 13.0
-## Vertical tracking smoothing speed toward the grounded floor baseline in Fluid mode.
-@export var fluid_vert_smooth: float = 5.5
-## Rotational smoothing speed for yaw/pitch orbit in Fluid mode.
-@export var fluid_orbit_smooth: float = 42.0
-## Smoothing speed when interpolating zoom distance changes in Fluid mode.
-@export var fluid_zoom_smooth: float = 10.0
-## Maximum camera roll tilt (degrees) during high-speed sprint-roll curves and skids.
-@export var fluid_bank_roll_deg: float = 1.25
-## Resting field of view (degrees) at normal movement speeds in Fluid mode.
-@export var fluid_base_fov: float = 74.0
-## Peak field of view (degrees) during high-speed states in Fluid mode.
-@export var fluid_boost_fov: float = 81.0
 
 var _camera_rig: Node3D
 var _camera: Camera3D
@@ -101,16 +108,21 @@ var _sound: SoundEngine
 var _dust: DustParticles
 
 var _target_yaw: float = 0.0
-var _target_pitch: float = -0.16
+var _target_pitch: float = -0.18
 var _current_yaw: float = 0.0
-var _current_pitch: float = -0.16
+var _current_pitch: float = -0.18
 var _prev_yaw: float = 0.0
 var _manual_orbit_yield_timer: float = 0.0
 
-var _target_zoom_distance: float = 7.6
-var _current_zoom_distance: float = 7.6
-var _smoothed_collision_dist: float = 7.6
+var _user_zoom_offset: float = 0.0
+var _current_zoom_distance: float = 8.5
+var _smoothed_collision_dist: float = 8.5
 var _smoothed_boost_ratio: float = 0.0
+
+# Smoothed framing parameters across dynamic options
+var _cur_shoulder_x: float = 1.2
+var _cur_pivot_height: float = 2.0
+var _cur_look_height: float = 2.3
 
 # Critically damped spring follow & grounded vertical hysteresis state
 var _spring_follow_pos: Vector3 = Vector3.ZERO
@@ -126,9 +138,13 @@ var _current_level_idx: int = 0
 var _roll_tick_accum: float = 0.0
 
 func _ready() -> void:
-	var default_dist := _get_mode_follow_distance()
-	_target_zoom_distance = clampf(default_dist, min_zoom_distance, max_zoom_distance)
-	_current_zoom_distance = _target_zoom_distance
+	var initial := _compute_desired_framing()
+	_target_pitch = initial["pitch"]
+	_current_pitch = _target_pitch
+	_cur_shoulder_x = initial["shoulder_x"]
+	_cur_pivot_height = initial["pivot_height"]
+	_cur_look_height = initial["look_height"]
+	_current_zoom_distance = clampf(initial["distance"], min_zoom_distance, max_zoom_distance)
 	_smoothed_collision_dist = _current_zoom_distance
 
 	_setup_lighting_if_needed()
@@ -163,6 +179,57 @@ func _ready() -> void:
 			_smoothed_collision_dist = _current_zoom_distance
 		)
 		_refresh_stack_hud()
+
+func _compute_desired_framing() -> Dictionary:
+	match framing_style:
+		CameraFramingStyle.WIDE_OTS:
+			return {
+				"distance": wide_ots_distance,
+				"shoulder_x": wide_ots_shoulder_x,
+				"pivot_height": wide_ots_pivot_height,
+				"look_height": wide_ots_look_height,
+				"pitch": wide_ots_default_pitch,
+			}
+		CameraFramingStyle.ODYSSEY_HIGH:
+			return {
+				"distance": odyssey_distance,
+				"shoulder_x": odyssey_shoulder_x,
+				"pivot_height": odyssey_pivot_height,
+				"look_height": odyssey_look_height,
+				"pitch": odyssey_default_pitch,
+			}
+		CameraFramingStyle.DYNAMIC_STACK:
+			var height_t := 1.0
+			if player_stack != null:
+				var count_t := clampf(float(player_stack._active_nodes.size() - 1) / 2.0, 0.0, 1.0)
+				var roll_damp := 1.0 - clampf(player_stack._roll_blend, 0.0, 1.0) * 0.85
+				height_t = count_t * roll_damp
+			return {
+				"distance": lerpf(dyn_low_distance, dyn_tall_distance, height_t),
+				"shoulder_x": lerpf(dyn_low_shoulder_x, dyn_tall_shoulder_x, height_t),
+				"pivot_height": lerpf(dyn_low_pivot_height, dyn_tall_pivot_height, height_t),
+				"look_height": lerpf(dyn_low_look_height, dyn_tall_look_height, height_t),
+				"pitch": dyn_default_pitch,
+			}
+		CameraFramingStyle.ACTION_AIM_SPLIT:
+			var is_aiming := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+			if not is_aiming and player_stack != null:
+				is_aiming = not player_stack._ejected_nodes.is_empty()
+			var aim_t := 1.0 if is_aiming else 0.0
+			return {
+				"distance": lerpf(split_explore_distance, split_aim_distance, aim_t),
+				"shoulder_x": lerpf(split_explore_shoulder_x, split_aim_shoulder_x, aim_t),
+				"pivot_height": lerpf(split_explore_pivot_height, split_aim_pivot_height, aim_t),
+				"look_height": lerpf(split_explore_look_height, split_aim_look_height, aim_t),
+				"pitch": split_default_pitch,
+			}
+	return {
+		"distance": dyn_tall_distance,
+		"shoulder_x": dyn_tall_shoulder_x,
+		"pivot_height": dyn_tall_pivot_height,
+		"look_height": dyn_tall_look_height,
+		"pitch": dyn_default_pitch,
+	}
 
 func _reset_level_contraptions() -> void:
 	for node: Node in find_children("*", "", true, false):
@@ -243,15 +310,6 @@ func _setup_sound() -> void:
 			_sound.play(&"ui_back", 0.85)
 		)
 
-func toggle_camera_mode() -> void:
-	camera_mode = CameraFeelMode.CINEMATIC_FLUID if camera_mode == CameraFeelMode.SNAPPY else CameraFeelMode.SNAPPY
-	_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
-	if _sound != null:
-		_sound.play(&"ui_slide", 0.65)
-
-func _get_mode_follow_distance() -> float:
-	return fluid_follow_distance if camera_mode == CameraFeelMode.CINEMATIC_FLUID else snappy_follow_distance
-
 func _refresh_stack_hud() -> void:
 	if _hud != null and player_stack != null:
 		_hud.update_stack_status(player_stack.get_stack_statuses())
@@ -319,7 +377,7 @@ func _setup_camera() -> void:
 	elif _camera.get_parent() != _camera_rig:
 		_camera.reparent(_camera_rig)
 
-	_camera.fov = snappy_base_fov if camera_mode == CameraFeelMode.SNAPPY else fluid_base_fov
+	_camera.fov = base_fov
 	_camera.current = true
 
 func _cast_camera_ray(from_pos: Vector3, to_pos: Vector3, exclude_rids: Array[RID]) -> float:
@@ -387,6 +445,7 @@ func _resolve_wall_safe_camera(center_pivot: Vector3, desired_shoulder_pivot: Ve
 	_smoothed_collision_dist = lerpf(_smoothed_collision_dist, target_dist, 1.0 - exp(-rate * delta))
 
 	return safe_shoulder + cam_dir * minf(_smoothed_collision_dist, desired_dist)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_ESCAPE:
@@ -408,16 +467,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_target_zoom_distance = clampf(_target_zoom_distance - zoom_step, min_zoom_distance, max_zoom_distance)
+			_user_zoom_offset -= zoom_step
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_target_zoom_distance = clampf(_target_zoom_distance + zoom_step, min_zoom_distance, max_zoom_distance)
+			_user_zoom_offset += zoom_step
 	elif event is InputEventKey and event.pressed and not event.echo:
-		if event.physical_keycode == KEY_V or event.physical_keycode == KEY_TAB:
-			toggle_camera_mode()
-		elif event.physical_keycode == KEY_Q or (InputMap.has_action("center_camera") and event.is_action_pressed("center_camera")):
+		if event.physical_keycode == KEY_Q or (InputMap.has_action("center_camera") and event.is_action_pressed("center_camera")):
+			var preset := _compute_desired_framing()
 			_target_yaw = 0.0
-			_target_pitch = -0.16
-			_target_zoom_distance = clampf(_get_mode_follow_distance(), min_zoom_distance, max_zoom_distance)
+			_target_pitch = preset["pitch"]
+			_user_zoom_offset = 0.0
 			_manual_orbit_yield_timer = manual_look_grace_time
 			if _sound != null:
 				_sound.play(&"ui_slide", 0.55, 1.1)
@@ -489,20 +547,19 @@ func _physics_process(delta: float) -> void:
 			_sound.stop_roll_hum(0.14)
 			_roll_tick_accum = 0.0
 
-	var is_fluid := camera_mode == CameraFeelMode.CINEMATIC_FLUID
-	var mode_dist := fluid_follow_distance if is_fluid else snappy_follow_distance
-	var mode_shoulder := fluid_shoulder_offset_x if is_fluid else snappy_shoulder_offset_x
-	var mode_pivot_h := fluid_pivot_height if is_fluid else snappy_pivot_height
-	var mode_look_h := fluid_look_ahead_height if is_fluid else snappy_look_ahead_height
-	var mode_look_fwd := fluid_look_ahead_forward if is_fluid else snappy_look_ahead_forward
-	var vel_lead_scale := fluid_velocity_lead if is_fluid else snappy_velocity_lead
-	var spring_freq := fluid_spring_freq if is_fluid else snappy_spring_freq
-	var v_smooth := fluid_vert_smooth if is_fluid else snappy_vert_smooth
-	var orbit_smooth := fluid_orbit_smooth if is_fluid else snappy_orbit_smooth
-	var zoom_smooth := fluid_zoom_smooth if is_fluid else snappy_zoom_smooth
-	var max_bank_deg := fluid_bank_roll_deg if is_fluid else snappy_bank_roll_deg
-	var base_fov := fluid_base_fov if is_fluid else snappy_base_fov
-	var boost_fov := fluid_boost_fov if is_fluid else snappy_boost_fov
+	var framing := _compute_desired_framing()
+	var base_dist: float = framing["distance"]
+	var target_shoulder: float = framing["shoulder_x"]
+	var target_pivot_h: float = framing["pivot_height"]
+	var target_look_h: float = framing["look_height"]
+
+	_user_zoom_offset = clampf(_user_zoom_offset, min_zoom_distance - base_dist, max_zoom_distance - base_dist)
+	var target_zoom_dist := clampf(base_dist + _user_zoom_offset, min_zoom_distance, max_zoom_distance)
+
+	var frame_alpha := 1.0 - exp(-framing_blend_speed * delta)
+	_cur_shoulder_x = lerpf(_cur_shoulder_x, target_shoulder, frame_alpha)
+	_cur_pivot_height = lerpf(_cur_pivot_height, target_pivot_h, frame_alpha)
+	_cur_look_height = lerpf(_cur_look_height, target_look_h, frame_alpha)
 
 	var raw_anchor := player_stack.get_leader_position()
 	if not _has_anchor:
@@ -532,7 +589,7 @@ func _physics_process(delta: float) -> void:
 			elif raw_anchor.y < _grounded_base_y - vertical_deadzone_down:
 				_grounded_base_y = lerpf(_grounded_base_y, raw_anchor.y + vertical_deadzone_down, 1.0 - exp(-8.0 * delta))
 
-		_smoothed_track_y = lerpf(_smoothed_track_y, _grounded_base_y, 1.0 - exp(-v_smooth * delta))
+		_smoothed_track_y = lerpf(_smoothed_track_y, _grounded_base_y, 1.0 - exp(-vert_smooth * delta))
 
 	# Subtle movement-assisted yaw only when not manually looking or skidding
 	var pre_yaw_basis := Basis(Vector3.UP, _current_yaw)
@@ -545,8 +602,8 @@ func _physics_process(delta: float) -> void:
 
 	_current_yaw = lerp_angle(_current_yaw, _target_yaw, 1.0 - exp(-orbit_smooth * delta))
 	_current_pitch = lerpf(_current_pitch, _target_pitch, 1.0 - exp(-orbit_smooth * delta))
-	_current_zoom_distance = lerpf(_current_zoom_distance, _target_zoom_distance, 1.0 - exp(-zoom_smooth * delta))
-	var zoom_ratio := clampf(_current_zoom_distance / maxf(0.1, mode_dist), 0.7, 1.65)
+	_current_zoom_distance = lerpf(_current_zoom_distance, target_zoom_dist, 1.0 - exp(-zoom_smooth * delta))
+	var zoom_ratio := clampf(_current_zoom_distance / maxf(0.1, base_dist), 0.7, 1.65)
 
 	# Dampen camera shake slightly for comfortable prolonged play
 	var shake := player_stack.camera_shake_offset * 0.65
@@ -555,44 +612,43 @@ func _physics_process(delta: float) -> void:
 	var forward_vec := -yaw_basis.z
 
 	# Keep look-ahead subtle so the camera frames upcoming jumps without swinging sideways
-	var target_vel_lead := horiz_vel * vel_lead_scale
+	var target_vel_lead := horiz_vel * velocity_lead
 	var yaw_rate := clampf(wrapf(_current_yaw - _prev_yaw, -PI, PI) / maxf(0.0001, delta), -3.0, 3.0)
 	var manual_damp := 0.35 if _manual_orbit_yield_timer > 0.0 else 1.0
-	var curve_bank := player_stack._turn_bank_angle * (6.0 if is_fluid else 3.0) * manual_damp
-	var target_bank := deg_to_rad(clampf(-yaw_rate * 0.14 - curve_bank, -max_bank_deg, max_bank_deg))
+	var curve_bank := player_stack._turn_bank_angle * 3.5 * manual_damp
+	var target_bank := deg_to_rad(clampf(-yaw_rate * 0.14 - curve_bank, -bank_roll_deg, bank_roll_deg))
 	_prev_yaw = _current_yaw
 
 	_smoothed_vel_lead = _smoothed_vel_lead.lerp(target_vel_lead, 1.0 - exp(-6.0 * delta))
 	_smoothed_bank_roll = lerpf(_smoothed_bank_roll, target_bank, 1.0 - exp(-7.0 * delta))
 
 	var target_boost_ratio: float = player_stack.get_speed_fov_ratio() if player_stack.has_method("get_speed_fov_ratio") else (1.0 if player_stack.is_high_speed_state() else 0.0)
-	var boost_rate: float = (4.5 if is_fluid else 6.0) if target_boost_ratio > _smoothed_boost_ratio else (2.4 if is_fluid else 3.2)
+	var boost_rate := 5.5 if target_boost_ratio > _smoothed_boost_ratio else 3.0
 	_smoothed_boost_ratio = lerpf(_smoothed_boost_ratio, target_boost_ratio, 1.0 - exp(-boost_rate * delta))
 
-	# Keep the pivot anchored to the spring follow position without sliding the pivot laterally with velocity
 	var tracked_anchor := Vector3(_spring_follow_pos.x, _smoothed_track_y, _spring_follow_pos.z)
-	var active_shoulder := mode_shoulder * lerpf(0.85, 1.15, clampf((zoom_ratio - 0.7) / 0.95, 0.0, 1.0))
+	var active_shoulder := _cur_shoulder_x * lerpf(0.85, 1.15, clampf((zoom_ratio - 0.7) / 0.95, 0.0, 1.0))
 	var up_aim_lift := maxf(0.0, _current_pitch) * 0.75
 
-	var center_pivot := Vector3(raw_anchor.x, _smoothed_track_y, raw_anchor.z) + Vector3.UP * (mode_pivot_h + up_aim_lift)
+	var center_pivot := Vector3(raw_anchor.x, _smoothed_track_y, raw_anchor.z) + Vector3.UP * (_cur_pivot_height + up_aim_lift)
 	var desired_shoulder_pivot := (
 		tracked_anchor
-		+ Vector3.UP * (mode_pivot_h + up_aim_lift)
+		+ Vector3.UP * (_cur_pivot_height + up_aim_lift)
 		+ right_vec * active_shoulder
 		+ shake
 	)
 
 	var rot := Basis.from_euler(Vector3(_current_pitch, _current_yaw, 0.0))
-	var dyn_dist := _current_zoom_distance + (0.85 if is_fluid else 0.45) * _smoothed_boost_ratio
+	var dyn_dist := _current_zoom_distance + 0.55 * _smoothed_boost_ratio
 	var desired_cam_pos := desired_shoulder_pivot + rot * Vector3(0.0, 0.0, dyn_dist)
 	var safe_cam_pos := _resolve_wall_safe_camera(center_pivot, desired_shoulder_pivot, desired_cam_pos, delta)
 	var pitch_aim_y := tan(_current_pitch) * 7.2
 	var look_target := (
 		tracked_anchor
 		+ Vector3(_smoothed_vel_lead.x, 0.0, _smoothed_vel_lead.z)
-		+ Vector3.UP * (mode_look_h + pitch_aim_y)
+		+ Vector3.UP * (_cur_look_height + pitch_aim_y)
 		+ right_vec * (active_shoulder * 0.92)
-		+ forward_vec * mode_look_fwd
+		+ forward_vec * look_ahead_forward
 		+ shake * 0.5
 	)
 
