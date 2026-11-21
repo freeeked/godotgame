@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://8wi1qs1f6e50" path="res://scripts/test_main.gd" id="1_0xm2m"]
 [ext_resource type="Script" uid="uid://dhtrm6jnaexc7" path="res://scripts/player_stack.gd" id="1_ig7tw"]
+[ext_resource type="Script" uid="uid://c84faubqj3d8q" path="res://scripts/stack_enemy.gd" id="3_5vw27"]
 [ext_resource type="Script" uid="uid://dgkgtyc8d4c22" path="res://scripts/sound_engine.gd" id="3_h2yge"]
 [ext_resource type="Script" uid="uid://mrqkgdga252i" path="res://scripts/button_gate.gd" id="5_lquwl"]
 [ext_resource type="Script" uid="uid://dh2wrwbih5w81" path="res://scripts/pneumatic_tube.gd" id="6_7mycd"]
@@ -211,6 +212,11 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 44, 8, -42)
 use_collision = true
 size = Vector3(10, 2, 10)
 material = SubResource("StandardMaterial3D_gold")
+
+[node name="CharacterBody3D" type="CharacterBody3D" parent="TestGym" unique_id=190258007]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -19.536009, 5.82432, -28.374653)
+script = ExtResource("3_5vw27")
+enemy_type = 1
 
 [node name="SoundEngine" type="Node" parent="." unique_id=321402970]
 script = ExtResource("3_h2yge")

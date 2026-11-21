@@ -176,6 +176,8 @@ func _reset_level_contraptions() -> void:
 			node.call("reset_block")
 		elif node.has_method("reset_powerup"):
 			node.call("reset_powerup")
+		elif node.has_method("reset_enemy"):
+			node.call("reset_enemy")
 
 func get_sound_engine() -> SoundEngine:
 	return _sound

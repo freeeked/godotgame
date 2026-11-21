@@ -2764,6 +2764,88 @@ func get_speed_fov_ratio() -> float:
 	var horiz_speed: float = Vector2(_leader_vel.x, _leader_vel.z).length()
 	return clampf((horiz_speed - move_speed) / 16.0, 0.0, 1.0)
 
+# --- Enemy & Projectile Interaction Helpers ---
+
+func get_active_driver_body() -> CharacterBody3D:
+	if _active_nodes.is_empty():
+		return null
+	return _active_nodes[0].body
+
+func get_ejected_blob_infos() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for b in _ejected_nodes:
+		if _dead_nodes.has(b) or _locked_ejected_nodes.has(b):
+			continue
+		out.append({
+			"blob": b,
+			"body": b.body,
+			"position": b.body.global_position,
+			"velocity": b.velocity,
+			"speed": b.velocity.length(),
+			"radius": b.radius,
+			"is_recalling": b.is_recalling,
+		})
+	return out
+
+func deflect_ejected_blob_on_hit(blob: StackBlob, hit_normal: Vector3) -> void:
+	if blob == null or not _ejected_nodes.has(blob):
+		return
+	var flat_n := Vector3(hit_normal.x, 0.0, hit_normal.z)
+	if flat_n.length_squared() < 0.01:
+		flat_n = Vector3(-sin(_facing_angle), 0.0, -cos(_facing_angle))
+	else:
+		flat_n = flat_n.normalized()
+
+	# Pop the ball upward & slightly back like Mario Odyssey Cappy/shell impacts
+	blob.velocity = Vector3(flat_n.x * 6.5, maxf(blob.velocity.y * 0.35, 9.5), flat_n.z * 6.5)
+	blob.is_rolling = false
+	blob.is_grounded = false
+	_apply_squash(blob, 0.34, -0.30)
+
+func apply_external_jostle(impulse: Vector3, shake_strength: float = 0.55) -> void:
+	if _active_nodes.is_empty() or _is_externally_controlled:
+		return
+	_clear_skid_state()
+	_cancel_stack_swoop()
+	_launch_momentum_timer = maxf(_launch_momentum_timer, 0.28)
+	_is_grounded = false
+	_coyote_timer = 0.0
+
+	_leader_vel.x += impulse.x
+	_leader_vel.z += impulse.z
+	_leader_vel.y = maxf(_leader_vel.y, impulse.y)
+
+	var horiz := Vector2(impulse.x, impulse.z)
+	var dir := horiz.normalized() if horiz.length_squared() > 0.01 else Vector2(sin(_facing_angle), cos(_facing_angle))
+
+	for idx in range(_active_nodes.size()):
+		var b := _active_nodes[idx]
+		var alt := 1.0 if (idx % 2 == 0) else -1.0
+		var tier_mult := 1.0 + float(idx) * 0.28
+		_apply_squash(b, 0.28, -0.25)
+		b.spring_vel.y = 18.0 + float(idx) * 3.0
+		b.spring_vel.x += dir.x * 16.0 * alt
+		b.spring_vel.z += dir.y * 16.0 * alt
+		if idx > 0:
+			b.velocity.x += impulse.x * 0.85 * tier_mult
+			b.velocity.z += impulse.z * 0.85 * tier_mult
+
+	trigger_camera_shake(Vector3(dir.x * shake_strength, 0.25 * shake_strength, dir.y * shake_strength))
+
+func bounce_off_enemy_head(bounce_velocity: float = 16.5) -> void:
+	if _active_nodes.is_empty():
+		return
+	_is_grounded = false
+	_coyote_timer = 0.0
+	_has_air_combo_jump = true
+	_leader_vel.y = maxf(_leader_vel.y, bounce_velocity)
+	jumped.emit(_active_nodes.size(), true)
+
+	for idx in range(_active_nodes.size()):
+		var b := _active_nodes[idx]
+		_apply_squash(b, -0.28 + float(idx) * 0.02, 0.34 - float(idx) * 0.02)
+		b.spring_vel.y = 20.0 + float(idx) * 2.5
+
 
 # --- Trenchcoat, Hat & Limbs Prototype ---
 
